@@ -54,7 +54,10 @@ class Trainer:
         self.scheduler = self._setup_scheduler()
 
         # Mixed precision training
-        self.scaler = GradScaler('cuda')
+        # self.scaler = GradScaler('cuda')
+
+        # Setup mixed precision training (fixed)
+        self.scaler = torch.amp.GradScaler()
 
         # Enable gradient checkpointing if configured
         if config['model'].get('gradient_checkpointing', False):
@@ -146,13 +149,13 @@ class Trainer:
             images = images.to(self.device)
             targets = targets.to(self.device)
 
-            # Mixed precision training
-            with autocast('cuda'):
+            # Mixed precision training (fixed)
+            with torch.cuda.amp.autocast(enabled=True):  # Use torch.cuda.amp.autocast with enabled=True
                 outputs = self.model(images)
                 loss, loss_components = self.criterion(outputs, targets)
 
-            # Backward pass
-            self.optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
+            # Rest of the training loop remains the same
+            self.optimizer.zero_grad(set_to_none=True)
             self.scaler.scale(loss).backward()
 
             # Gradient clipping
