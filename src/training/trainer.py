@@ -31,16 +31,14 @@ class Trainer:
             raise ValueError(f"Error converting optimizer parameters to float: {e}")
 
         # Initialize metrics calculator
-        self.metric_calculator = MetricCalculator(
-            train_loader.dataset.disease_names
-        )
+        self.metric_calculator = MetricCalculator(train_loader.dataset.disease_names)
 
         # Setup criterion with class weights
         self.criterion = nn.BCEWithLogitsLoss(
             pos_weight=train_loader.dataset.class_weights.to(device)
         )
 
-        # Setup optimizer with validated parameters
+        # Setup optimizer
         self.optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=learning_rate,
@@ -52,13 +50,16 @@ class Trainer:
         # Setup scheduler with warmup
         self.scheduler = self.get_scheduler()
 
-        # Setup mixed precision training
-        self.scaler = torch.cuda.amp.GradScaler()
+        # Setup mixed precision training (updated to new API)
+        self.scaler = torch.amp.GradScaler('cuda')
 
         # Initialize tracking variables
         self.best_val_auc = 0
         self.patience_counter = 0
         self.current_epoch = 0
+        self.train_metrics_history = []
+        self.val_metrics_history = []
+
 
         # Initialize metrics history
         self.train_metrics_history = []
@@ -251,23 +252,19 @@ class Trainer:
                     logger.info("Early stopping triggered")
                     break
 
-                # Regular checkpoint saving
-                if (epoch + 1) % self.config['training']['save_freq'] == 0:
-                    self.save_checkpoint(val_metrics)
-
         except Exception as e:
             logger.error(f"Training failed with error: {str(e)}")
             raise
 
         finally:
-            # Save final results
-            final_metrics = {
-                'best_val_auc': self.best_val_auc,
-                'final_train_metrics': self.train_metrics_history[-1],
-                'final_val_metrics': self.val_metrics_history[-1]
-            }
-            wandb.log({"final_metrics": final_metrics})
+            logger.info("Training completed!")
 
-        logger.info("Training completed!")
-        return final_metrics
+        # Return final metrics as simple values, not nested dictionaries
+        return {
+            'best_val_auc': float(self.best_val_auc),
+            'final_train_loss': float(self.train_metrics_history[-1]['loss']),
+            'final_train_auc': float(self.train_metrics_history[-1]['mean_auc']),
+            'final_val_loss': float(self.val_metrics_history[-1]['loss']),
+            'final_val_auc': float(self.val_metrics_history[-1]['mean_auc'])
+        }
 
