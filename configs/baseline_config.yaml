@@ -1,0 +1,47 @@
+# configs/baseline_config.yaml
+data:
+  train_dir: "/NewRaidData/ghazal/data/ChestX-ray14/categorized_images/train"
+  val_dir: "/NewRaidData/ghazal/data/ChestX-ray14/categorized_images/val"
+  train_labels: "/NewRaidData/ghazal/data/ChestX-ray14/labels/train_list.txt"
+  val_labels: "/NewRaidData/ghazal/data/ChestX-ray14/labels/val_list.txt"
+  image_size: 224
+  batch_size: 32
+  num_workers: 4
+
+model:
+  name: "vit_base_16"
+  pretrained_path: "./vit-b_CXR_0.5M_mae.pth"
+  img_size: 224
+  patch_size: 16
+  in_chans: 3
+  num_classes: 14
+  embed_dim: 768
+  depth: 12
+  num_heads: 12
+  mlp_ratio: 4
+  drop_rate: 0.1
+
+training:
+  epochs: 1
+  learning_rate: 1e-4
+  weight_decay: 0.05
+  warmup_epochs: 5
+  eval_freq: 1
+  save_freq: 5
+  early_stopping_patience: 10
+
+optimizer:
+  name: "adamw"
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1e-8
+
+wandb:
+  project: "thoracic-disease-classification"
+  name: "baseline-vit"
+  entity: "mirzaeeghazal"
+
+paths:
+  save_dir: "checkpoints"
+  log_dir: "logs"
+
