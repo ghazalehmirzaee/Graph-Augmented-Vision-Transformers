@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 from datetime import datetime
 import torch
-
+import numpy as np
 
 
 def setup_logging(config):
