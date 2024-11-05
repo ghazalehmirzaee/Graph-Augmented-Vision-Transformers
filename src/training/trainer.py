@@ -13,7 +13,6 @@ from torch.nn.utils import clip_grad_norm_
 
 logger = logging.getLogger(__name__)
 
-
 class Trainer:
     def __init__(self, model, train_loader, val_loader, config, device):
         self.model = model
@@ -37,27 +36,31 @@ class Trainer:
         # Initialize metrics calculator
         self.metric_calculator = MetricCalculator(train_loader.dataset.disease_names)
 
-        # Setup combined loss with class weights
+        # Setup criterion with proper device placement
         class_weights = train_loader.dataset.class_weights.to(device)
         self.criterion = DynamicWeightedLoss(
             num_classes=config['model']['num_classes'],
             class_weights=class_weights
         ).to(device)
 
-        # Setup optimizer
+        # Rest of initialization remains the same
         self.optimizer = torch.optim.AdamW(
-            model.parameters(),
+            [
+                {'params': model.parameters()},
+                {'params': self.criterion.parameters(), 'lr': self.learning_rate * 0.1}
+            ],
             lr=self.learning_rate,
             weight_decay=self.weight_decay,
             betas=(self.beta1, self.beta2),
             eps=self.eps
         )
 
-        # Setup scheduler
-        self.scheduler = self._setup_scheduler()
-
         # Setup mixed precision training
         self.scaler = torch.cuda.amp.GradScaler()
+        self.autocast_dtype = torch.float16
+
+        # Setup scheduler
+        self.scheduler = self._setup_scheduler()
 
         # Training monitoring
         self.best_val_auc = 0
@@ -87,57 +90,71 @@ class Trainer:
         self.model.train()
         epoch_predictions = []
         epoch_targets = []
-        epoch_losses = []
-        component_losses = {'wbce': [], 'focal': [], 'asl': []}
+        epoch_losses = {'total': [], 'wbce': [], 'focal': [], 'asl': []}
 
         pbar = tqdm(self.train_loader, desc=f'Epoch {self.current_epoch + 1}')
         for batch_idx, (images, targets) in enumerate(pbar):
-            images = images.to(self.device)
-            targets = targets.to(self.device)
+            images = images.to(self.device, non_blocking=True)
+            targets = targets.to(self.device, non_blocking=True)
 
-            with torch.autocast(device_type='cuda', dtype=torch.float16):
+            # Forward pass with mixed precision
+            with torch.cuda.amp.autocast(enabled=True, dtype=self.autocast_dtype):
                 outputs = self.model(images)
                 loss, loss_components = self.criterion(outputs, targets)
 
+                # Ensure loss is scalar
+                if not isinstance(loss, torch.Tensor) or loss.numel() > 1:
+                    loss = loss.mean()
+
             # Backward pass
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
             self.scaler.scale(loss).backward()
 
             # Gradient clipping
-            self.scaler.unscale_(self.optimizer)
-            grad_norm = clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+            if self.max_grad_norm > 0:
+                self.scaler.unscale_(self.optimizer)
+                clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
 
+            # Optimizer step
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
             # Update learning rate
             self.scheduler.step()
 
-            # Store predictions and losses
+            # Record batch results
             with torch.no_grad():
-                epoch_predictions.append(torch.sigmoid(outputs).cpu().numpy())
+                preds = torch.sigmoid(outputs)
+                epoch_predictions.append(preds.cpu().numpy())
                 epoch_targets.append(targets.cpu().numpy())
-                epoch_losses.append(loss.item())
-
-                # Store component losses
+                epoch_losses['total'].append(loss.item())
                 for k, v in loss_components.items():
-                    component_losses[k].append(v.item())
+                    epoch_losses[k].append(v.item())
 
             # Update progress bar
             pbar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'lr': f'{self.scheduler.get_last_lr()[0]:.6f}'
+                'loss': f"{loss.item():.4f}",
+                'lr': f"{self.scheduler.get_last_lr()[0]:.2e}"
             })
 
-        # Calculate metrics
+            # Log batch metrics
+            if batch_idx % 100 == 0:
+                wandb.log({
+                    'train/batch_loss': loss.item(),
+                    'train/learning_rate': self.scheduler.get_last_lr()[0],
+                    **{f'train/batch_loss_{k}': v[-1] for k, v in epoch_losses.items()}
+                })
+
+        # Calculate epoch metrics
         predictions = np.vstack(epoch_predictions)
         targets = np.vstack(epoch_targets)
         metrics = self.metric_calculator.calculate_metrics(targets, predictions)
 
         # Add losses to metrics
-        metrics['loss'] = np.mean(epoch_losses)
-        for k, v in component_losses.items():
-            metrics[f'loss_{k}'] = np.mean(v)
+        metrics.update({
+            f'loss_{k}': np.mean(v) for k, v in epoch_losses.items()
+        })
+        metrics['loss'] = metrics['loss_total']
 
         return metrics
 
@@ -149,12 +166,13 @@ class Trainer:
 
         with torch.no_grad():
             for images, targets in tqdm(self.val_loader, desc='Validation'):
-                images = images.to(self.device)
-                targets = targets.to(self.device)
+                images = images.to(self.device, non_blocking=True)
+                targets = targets.to(self.device, non_blocking=True)
 
-                with torch.autocast(device_type='cuda', dtype=torch.float16):
+                with torch.cuda.amp.autocast(enabled=True, dtype=self.autocast_dtype):
                     outputs = self.model(images)
                     loss, _ = self.criterion(outputs, targets)
+                    loss = loss.mean() if not isinstance(loss, float) else loss
 
                 val_predictions.append(torch.sigmoid(outputs).cpu().numpy())
                 val_targets.append(targets.cpu().numpy())
