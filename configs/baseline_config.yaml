@@ -18,12 +18,12 @@ model:
   embed_dim: 768
   depth: 12
   num_heads: 12
-  mlp_ratio: 4
+  mlp_ratio: 4.0  # Note the .0 to ensure float
   drop_rate: 0.1
 
 training:
   epochs: 1
-  learning_rate: 1e-4
+  learning_rate: 0.0001  # Changed from 1e-4 to explicit decimal
   weight_decay: 0.05
   warmup_epochs: 5
   eval_freq: 1
@@ -34,14 +34,14 @@ optimizer:
   name: "adamw"
   beta1: 0.9
   beta2: 0.999
-  eps: 1e-8
+  eps: 1.0e-8  # Changed to ensure float
+
+paths:
+  save_dir: "checkpoints"
+  log_dir: "logs"
 
 wandb:
   project: "thoracic-disease-classification"
   name: "baseline-vit"
   entity: "mirzaeeghazal"
-
-paths:
-  save_dir: "checkpoints"
-  log_dir: "logs"
 

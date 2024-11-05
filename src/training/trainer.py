@@ -20,6 +20,16 @@ class Trainer:
         self.config = config
         self.device = device
 
+        # Ensure numerical parameters are floats
+        try:
+            learning_rate = float(config['training']['learning_rate'])
+            weight_decay = float(config['training']['weight_decay'])
+            beta1 = float(config['optimizer']['beta1'])
+            beta2 = float(config['optimizer']['beta2'])
+            eps = float(config['optimizer']['eps'])
+        except ValueError as e:
+            raise ValueError(f"Error converting optimizer parameters to float: {e}")
+
         # Initialize metrics calculator
         self.metric_calculator = MetricCalculator(
             train_loader.dataset.disease_names
@@ -30,14 +40,13 @@ class Trainer:
             pos_weight=train_loader.dataset.class_weights.to(device)
         )
 
-        # Setup optimizer
+        # Setup optimizer with validated parameters
         self.optimizer = torch.optim.AdamW(
             model.parameters(),
-            lr=config['training']['learning_rate'],
-            weight_decay=config['training']['weight_decay'],
-            betas=(config['optimizer']['beta1'],
-                   config['optimizer']['beta2']),
-            eps=config['optimizer']['eps']
+            lr=learning_rate,
+            weight_decay=weight_decay,
+            betas=(beta1, beta2),
+            eps=eps
         )
 
         # Setup scheduler with warmup
@@ -54,6 +63,8 @@ class Trainer:
         # Initialize metrics history
         self.train_metrics_history = []
         self.val_metrics_history = []
+
+
 
     def get_scheduler(self):
         """Create learning rate scheduler with warmup"""

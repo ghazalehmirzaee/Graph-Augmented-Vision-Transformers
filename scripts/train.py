@@ -15,6 +15,7 @@ from src.training.trainer import Trainer
 from src.utils.logging import setup_logging, log_system_info, log_dataset_info
 from src.utils.metrics import MetricCalculator
 from torchvision import transforms
+from src.utils.config_validation import validate_config
 
 
 def parse_args():
@@ -116,6 +117,16 @@ def create_model(config, device):
 def main():
     # Parse arguments
     args = parse_args()
+
+    # Load and validate configuration
+    # with open(args.config) as f:
+    #     config = yaml.safe_load(f)
+
+    # try:
+    #     config = validate_config(config)
+    # except ValueError as e:
+    #     logger.error(f"Configuration validation failed: {str(e)}")
+    #     return
 
     # Load configuration
     with open(args.config) as f:
