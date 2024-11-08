@@ -43,10 +43,11 @@ class MetricCalculator:
                     targets[:, i], binary_preds[:, i]
                 ).ravel()
 
+
                 # Sensitivity (Recall) and Specificity
-                metrics[f'{disease}_sensitivity'] = tp / (tp + fn)
-                metrics[f'{disease}_specificity'] = tn / (tn + fp)
-                metrics[f'{disease}_precision'] = tp / (tp + fp)
+                metrics[f'{disease}_sensitivity'] = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+                metrics[f'{disease}_specificity'] = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+                metrics[f'{disease}_precision'] = tp / (tp + fp) if (tp + fp) > 0 else 0.0
 
         # Calculate mean metrics
         metric_types = ['auc', 'ap', 'f1', 'sensitivity', 'specificity', 'precision']
