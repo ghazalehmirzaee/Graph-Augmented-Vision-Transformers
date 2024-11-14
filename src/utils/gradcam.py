@@ -259,8 +259,10 @@ class VisionTransformerGradCAM:
         if target_category is None:
             target_category = model_output.argmax(dim=1)
 
-        # Get attention maps
-        attention_maps = self.generate_attention_maps(input_tensor)
+        # Check if gradients are captured; if not, log an error and exit
+        if not self.gradients:
+            print_status("Error: Gradients were not captured.")
+            return None
 
         # Backward pass
         self.model.zero_grad()
@@ -268,38 +270,13 @@ class VisionTransformerGradCAM:
         one_hot[0][target_category] = 1
         model_output.backward(gradient=one_hot, retain_graph=True)
 
-        # Check if gradients were captured
         if not self.gradients:
             print_status("Error: Gradients were not captured.")
-            return None  # or raise an error
+            return None
 
         # Get gradients and feature maps
         gradients = self.gradients[0][0]  # [num_patches, hidden_dim]
         feature_maps = self.feature_maps[0][0]  # [num_patches, hidden_dim]
-
-    #     # Rest of the code continues...
-    #
-    # def __call__(self, input_tensor, target_category=None):
-    #     self.feature_maps = []
-    #     self.gradients = []
-    #
-    #     # Get model prediction
-    #     model_output = self.model(input_tensor)
-    #     if target_category is None:
-    #         target_category = model_output.argmax(dim=1)
-    #
-    #     # Get attention maps
-    #     attention_maps = self.generate_attention_maps(input_tensor)
-    #
-    #     # Backward pass
-    #     self.model.zero_grad()
-    #     one_hot = torch.zeros_like(model_output)
-    #     one_hot[0][target_category] = 1
-    #     model_output.backward(gradient=one_hot, retain_graph=True)
-    #
-    #     # Get gradients and feature maps
-    #     gradients = self.gradients[0][0]  # [num_patches, hidden_dim]
-    #     feature_maps = self.feature_maps[0][0]  # [num_patches, hidden_dim]
 
         # Remove CLS token
         gradients = gradients[1:]
@@ -332,7 +309,7 @@ class VisionTransformerGradCAM:
         cam = cam.squeeze().detach().cpu().numpy()
         cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
 
-        return cam
+        return cam if cam is not None else np.zeros((224, 224))
 
 
 def process_image(image_path, model, bboxes, labels, transform, output_dir):
@@ -403,6 +380,12 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
 
         for idx, (prob, disease) in enumerate(zip(predictions, disease_names)):
             if prob > 0.5:  # Only for predicted diseases
+                # In process_image function
+                # cam = grad_cam(input_tensor, idx)
+                # if cam is None:
+                #     print_status(f"Skipping image {img_name} due to missing Grad-CAM output")
+                #     continue  # Skip processing this image if Grad-CAM fails
+
                 cam = grad_cam(input_tensor, idx)
                 # Weight the CAM by prediction confidence
                 cam = cam * float(prob)
