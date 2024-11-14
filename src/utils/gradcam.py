@@ -297,7 +297,7 @@ class VisionTransformerGradCAM:
         cam = cam - cam.min()
         cam = cam / (cam.max() + 1e-8)
 
-        return cam.cpu().numpy()
+        return cam.detach().cpu().numpy()
 
 
 def process_image(image_path, model, bboxes, labels, transform, output_dir, ground_truth_labels=None):
