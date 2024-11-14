@@ -202,84 +202,120 @@ class VisionTransformer(nn.Module):
 
 
 class VisionTransformerGradCAM:
-    def __init__(self, model):
+    def __init__(self, model, layer_name='blocks.-1'):
         self.model = model
-        self.features = None
-        self.gradient = None
+        self.layer_name = layer_name
+        self.feature_maps = []
+        self.gradients = []
+
+        # Register hooks
+        for name, module in self.model.named_modules():
+            if self.layer_name in name:
+                module.register_forward_hook(self.save_features)
+                module.register_full_backward_hook(self.save_gradients)
 
     def save_features(self, module, input, output):
-        self.features = output
+        self.feature_maps.append(output)
 
-    def save_gradient(self, module, grad_input, grad_output):
-        self.gradient = grad_output[0]
+    def save_gradients(self, module, grad_input, grad_output):
+        self.gradients.append(grad_output[0])
 
-    def __call__(self, input_tensor, target_category):
-        # Register hooks
-        handle_features = self.model.blocks[-1].register_forward_hook(self.save_features)
-        handle_gradient = self.model.blocks[-1].register_full_backward_hook(self.save_gradient)
+    def get_attention_weights(self):
+        """Get attention weights from the model"""
+        attention_weights = []
+        for block in self.model.blocks:
+            weights = block.attn.attn_drop.p  # Get dropout probability as proxy for attention
+            attention_weights.append(weights)
+        return torch.tensor(attention_weights)
 
-        try:
-            # Forward pass
-            logits = self.model(input_tensor)
+    def generate_attention_maps(self, input_tensor):
+        """Generate attention maps for each layer"""
+        attention_maps = []
 
-            # Get target activation
-            if target_category is None:
-                target_category = logits.argmax(dim=-1)
+        # Forward pass to get attention weights
+        with torch.no_grad():
+            x = self.model.patch_embed(input_tensor)
+            cls_token = self.model.cls_token.expand(x.shape[0], -1, -1)
+            x = torch.cat((cls_token, x), dim=1)
+            x = x + self.model.pos_embed
 
-            self.model.zero_grad()
-            one_hot = torch.zeros_like(logits)
-            one_hot[0][target_category] = 1
-            logits.backward(gradient=one_hot, retain_graph=True)
+            for block in self.model.blocks:
+                x = block.norm1(x)
+                qkv = block.attn.qkv(x).reshape(x.shape[0], x.shape[1], 3, block.attn.num_heads, -1).permute(2, 0, 3, 1,
+                                                                                                             4)
+                q, k, v = qkv[0], qkv[1], qkv[2]
+                attn = (q @ k.transpose(-2, -1)) * block.attn.scale
+                attn = attn.softmax(dim=-1)
+                attention_maps.append(attn)
 
-            # Get gradients and features
-            gradients = self.gradient[0, 1:]  # Remove CLS token
-            features = self.features[0, 1:]  # Remove CLS token
+        return attention_maps
 
-            # Calculate importance weights
-            weights = gradients.mean(dim=-1).unsqueeze(-1)  # [N, 1]
+    def __call__(self, input_tensor, target_category=None):
+        self.feature_maps = []
+        self.gradients = []
 
-            # Weight features with gradients
-            weighted_features = features * weights
+        # Get model prediction
+        model_output = self.model(input_tensor)
+        if target_category is None:
+            target_category = model_output.argmax(dim=1)
 
-            # Calculate CAM
-            cam = weighted_features.mean(dim=-1)  # [N]
+        # Get attention maps
+        attention_maps = self.generate_attention_maps(input_tensor)
 
-            # Reshape to square
-            n_patches = int(np.sqrt(cam.shape[0]))
-            cam = cam.reshape(n_patches, n_patches)
+        # Backward pass
+        self.model.zero_grad()
+        one_hot = torch.zeros_like(model_output)
+        one_hot[0][target_category] = 1
+        model_output.backward(gradient=one_hot, retain_graph=True)
 
-            # Apply ReLU
-            cam = F.relu(cam)
+        # Get gradients and feature maps
+        gradients = self.gradients[0][0]  # [num_patches, hidden_dim]
+        feature_maps = self.feature_maps[0][0]  # [num_patches, hidden_dim]
 
-            # Interpolate to image size
-            cam = F.interpolate(
-                cam.unsqueeze(0).unsqueeze(0),
-                size=(224, 224),
-                mode='bicubic',
-                align_corners=False
-            )
+        # Remove CLS token
+        gradients = gradients[1:]
+        feature_maps = feature_maps[1:]
 
-            # Convert to numpy and normalize
-            cam = cam.squeeze().detach().cpu().numpy()
-            cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
+        # Calculate importance weights
+        weights = gradients.mean(dim=0)  # [hidden_dim]
 
-            return cam
+        # Apply attention rollout
+        cam = torch.zeros(feature_maps.shape[0])  # [num_patches]
+        for i in range(len(attention_maps)):
+            attention = attention_maps[i][:, :, 1:, 1:]  # Remove CLS token
+            attention = attention.mean(dim=1)  # Average over heads
+            cam += (attention @ weights).squeeze()
 
-        finally:
-            handle_features.remove()
-            handle_gradient.remove()
+        # Reshape to square
+        num_patches = int(np.sqrt(cam.shape[0]))
+        cam = cam.reshape(num_patches, num_patches)
+
+        # Apply ReLU and normalize
+        cam = F.relu(cam)
+        cam = F.interpolate(
+            cam.unsqueeze(0).unsqueeze(0),
+            size=(224, 224),
+            mode='bicubic',
+            align_corners=False
+        )
+
+        # Normalize between 0 and 1
+        cam = cam.squeeze().detach().cpu().numpy()
+        cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
+
+        return cam
 
 
 def process_image(image_path, model, bboxes, labels, transform, output_dir):
     try:
-        # Load image
+        # Load and preprocess image
         img = cv2.imread(image_path)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        # Create figure with two subplots
+        # Create figure
         plt.figure(figsize=(20, 8))
 
-        # Plot 1: Original with boxes
+        # Plot original image with boxes
         plt.subplot(1, 2, 1)
         img_with_boxes = img.copy()
         colors = plt.cm.rainbow(np.linspace(0, 1, len(labels)))
@@ -293,6 +329,7 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
                 color_rgb,
                 2
             )
+
             # Add label with background
             text_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
             cv2.rectangle(
@@ -316,13 +353,12 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
         plt.title("Original with Ground Truth", fontsize=12)
         plt.axis('off')
 
-        # Plot 2: GradCAM
+        # Generate GradCAM
         plt.subplot(1, 2, 2)
-
-        # Transform image for model
         input_tensor = transform(Image.fromarray(img)).unsqueeze(0)
         grad_cam = VisionTransformerGradCAM(model)
 
+        # Get predictions
         with torch.no_grad():
             predictions = torch.sigmoid(model(input_tensor)).squeeze()
 
@@ -332,13 +368,15 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
             'Edema', 'Emphysema', 'Fibrosis', 'Pleural_Thickening', 'Hernia'
         ]
 
-        # Generate combined GradCAM for predicted diseases
+        # Generate individual GradCAMs for each predicted disease
         combined_cam = np.zeros((224, 224))
         pred_text = "Predictions:\n"
 
         for idx, (prob, disease) in enumerate(zip(predictions, disease_names)):
             if prob > 0.5:  # Only for predicted diseases
                 cam = grad_cam(input_tensor, idx)
+                # Weight the CAM by prediction confidence
+                cam = cam * float(prob)
                 combined_cam = np.maximum(combined_cam, cam)
                 pred_text += f"{disease}: {prob:.3f}\n"
 
@@ -346,9 +384,13 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
         heatmap = cv2.applyColorMap(np.uint8(255 * combined_cam), cv2.COLORMAP_JET)
         heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
 
-        # Overlay on original image
+        # Resize original image
         img_resized = cv2.resize(img, (224, 224))
-        overlay = cv2.addWeighted(img_resized, 0.7, heatmap, 0.3, 0)
+
+        # Create overlay with adaptive alpha
+        alpha = combined_cam[..., np.newaxis]  # Make alpha channel same shape as RGB
+        overlay = img_resized * (1 - alpha * 0.7) + heatmap * (alpha * 0.7)
+        overlay = overlay.astype(np.uint8)
 
         plt.imshow(overlay)
         plt.title("GradCAM (Predicted Diseases)", fontsize=12)
@@ -449,7 +491,7 @@ def main():
 
     print_status("Loading model...")
 
-    # Initialize model
+    # Initialize and load model
     model = VisionTransformer(
         img_size=224,
         patch_size=16,
@@ -462,7 +504,6 @@ def main():
         drop_rate=0.0
     )
 
-    # Try loading checkpoint
     if not safe_load_checkpoint(checkpoint, model):
         print_status("Failed to load checkpoint. Exiting...")
         return
@@ -478,18 +519,16 @@ def main():
                              std=[0.229, 0.224, 0.225])
     ])
 
-    # Process images
     try:
         print_status("Reading bounding box data...")
         image_info = get_images_with_multiple_boxes(bbox_csv)
         print_status(f"Found {len(image_info)} images with multiple boxes")
 
-        # Select random 20 images
+        # Process images
         all_images = list(image_info.keys())
         selected_images = np.random.choice(all_images, size=20, replace=False)
 
         successful = 0
-
         for idx, img_name in enumerate(selected_images, 1):
             print_status(f"Processing image {idx}/20: {img_name}")
 
@@ -518,3 +557,9 @@ def main():
 
     except Exception as e:
         print_status(f"Error during processing: {str(e)}")
+
+
+if __name__ == '__main__':
+    main()
+
+    
