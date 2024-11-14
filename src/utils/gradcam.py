@@ -13,7 +13,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw
-import pickle5 as pickle
+import pickle
 import io
 import types
 
@@ -480,15 +480,6 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
 #     print_status("All loading attempts failed")
 #     return False
 
-
-import torch
-from datetime import datetime
-
-def print_status(message):
-    """Simple status printing function"""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] {message}", flush=True)
-
 def safe_load_checkpoint(checkpoint_path, model):
     """Safely load checkpoint using torch.load"""
     print_status("Loading checkpoint...")
@@ -503,8 +494,18 @@ def safe_load_checkpoint(checkpoint_path, model):
         else:
             state_dict = checkpoint
 
+        # Resize position embeddings if necessary
+        if 'pos_embed' in state_dict and hasattr(model, 'pos_embed'):
+            old_shape = model.pos_embed.shape
+            new_shape = state_dict['pos_embed'].shape
+            if old_shape != new_shape:
+                print_status(f"Resizing pos_embed from {new_shape} to {old_shape}")
+                state_dict['pos_embed'] = torch.nn.functional.interpolate(
+                    state_dict['pos_embed'].unsqueeze(0), size=old_shape[-2:], mode='bilinear', align_corners=False
+                ).squeeze(0)
+
         # Load the state dictionary into the model
-        model.load_state_dict(state_dict)
+        model.load_state_dict(state_dict, strict=False)
         print_status("Successfully loaded checkpoint")
         return True
 
@@ -512,7 +513,6 @@ def safe_load_checkpoint(checkpoint_path, model):
         # Handle any errors during loading
         print_status(f"Failed to load checkpoint: {str(e)}")
         return False
-
 
 
 def main():
