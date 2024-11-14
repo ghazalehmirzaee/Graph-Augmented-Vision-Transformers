@@ -565,96 +565,6 @@ def safe_load_checkpoint(checkpoint_path, model):
 def debug_tensor_shape(tensor, name):
     print_status(f"{name} shape: {tensor.shape}")
 
-#
-# def main():
-#     # Create output directory
-#     output_dir = 'outputs'
-#     os.makedirs(output_dir, exist_ok=True)
-#     print_status(f"Created output directory: {output_dir}")
-#
-#     # Paths
-#     bbox_csv = '/users/gm00051/ChestX-ray14/labels/BBox_List_2017.csv'
-#     image_dir = '/users/gm00051/ChestX-ray14/images'
-#     checkpoint = '/users/gm00051/projects/cvpr/baseline/Graph-Augmented-Vision-Transformers/scripts/checkpoints/best_model.pt'
-#
-#     print_status("Loading model...")
-#
-#     # Initialize model
-#     model = VisionTransformer(
-#         img_size=224,
-#         patch_size=16,
-#         in_chans=3,
-#         num_classes=14,
-#         embed_dim=768,
-#         depth=12,
-#         num_heads=12,
-#         mlp_ratio=4.0,
-#         drop_rate=0.0
-#     )
-#
-#     # Try loading checkpoint
-#     if not safe_load_checkpoint(checkpoint, model):
-#         print_status("Failed to load checkpoint. Exiting...")
-#         return
-#
-#     model.eval()
-#     print_status("Model ready for inference")
-#
-#     # Transform
-#     transform = transforms.Compose([
-#         transforms.Resize((224, 224)),
-#         transforms.ToTensor(),
-#         transforms.Normalize(mean=[0.485, 0.456, 0.406],
-#                              std=[0.229, 0.224, 0.225])
-#     ])
-#
-#     # Process images
-#     try:
-#         print_status("Reading bounding box data...")
-#         image_info = get_images_with_multiple_boxes(bbox_csv)
-#         print_status(f"Found {len(image_info)} images with multiple boxes")
-#
-#         successful = 0
-#         total = len(image_info)
-#
-#         for idx, (img_name, info) in enumerate(image_info.items(), 1):
-#             print_status(f"Processing image {idx}/{total}: {img_name}")
-#
-#             image_path = os.path.join(image_dir, img_name)
-#             if not os.path.exists(image_path):
-#                 print_status(f"Image not found: {image_path}")
-#                 continue
-#
-#             success = process_image(
-#                 image_path=image_path,
-#                 model=model,
-#                 bboxes=info['bboxes'],
-#                 labels=info['labels'],
-#                 transform=transform,
-#                 output_dir=output_dir
-#             )
-#
-#             if success:
-#                 successful += 1
-#
-#             if idx % 10 == 0:
-#                 print_status(f"Progress: {idx}/{total} images processed ({successful} successful)")
-#
-#         print_status(f"Processing complete! Successfully processed {successful}/{total} images")
-#         print_status(f"Results saved in {output_dir}")
-#
-#     except Exception as e:
-#         print_status(f"Error during processing: {str(e)}")
-#
-#
-# if __name__ == '__main__':
-#     try:
-#         main()
-#     except Exception as e:
-#         print_status(f"Fatal error: {str(e)}")
-#
-#
-
 
 def main():
     # Create output directory
@@ -682,7 +592,7 @@ def main():
         drop_rate=0.0
     )
 
-    # Load checkpoint
+    # Try loading checkpoint
     if not safe_load_checkpoint(checkpoint, model):
         print_status("Failed to load checkpoint. Exiting...")
         return
@@ -704,20 +614,37 @@ def main():
         image_info = get_images_with_multiple_boxes(bbox_csv)
         print_status(f"Found {len(image_info)} images with multiple boxes")
 
-        # Process random subset of images
-        process_image(
-            image_info=image_info,
-            image_dir=image_dir,
-            model=model,
-            transform=transform,
-            output_dir=output_dir,
-            num_images=20
-        )
+        successful = 0
+        total = len(image_info)
+
+        for idx, (img_name, info) in enumerate(image_info.items(), 1):
+            print_status(f"Processing image {idx}/{total}: {img_name}")
+
+            image_path = os.path.join(image_dir, img_name)
+            if not os.path.exists(image_path):
+                print_status(f"Image not found: {image_path}")
+                continue
+
+            success = process_image(
+                image_path=image_path,
+                model=model,
+                bboxes=info['bboxes'],
+                labels=info['labels'],
+                transform=transform,
+                output_dir=output_dir
+            )
+
+            if success:
+                successful += 1
+
+            if idx % 10 == 0:
+                print_status(f"Progress: {idx}/{total} images processed ({successful} successful)")
+
+        print_status(f"Processing complete! Successfully processed {successful}/{total} images")
+        print_status(f"Results saved in {output_dir}")
 
     except Exception as e:
         print_status(f"Error during processing: {str(e)}")
-        import traceback
-        traceback.print_exc()
 
 
 if __name__ == '__main__':
@@ -725,4 +652,5 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         print_status(f"Fatal error: {str(e)}")
+
 
