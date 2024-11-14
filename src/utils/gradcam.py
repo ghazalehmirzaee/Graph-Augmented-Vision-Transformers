@@ -2,7 +2,6 @@ import os
 import sys
 import numpy as np
 import pandas as pd
-from PIL import Image, ImageDraw
 import cv2
 from datetime import datetime
 import torch
@@ -10,10 +9,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 import matplotlib
-
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-
+from PIL import Image, ImageDraw
+import pickle
+import warnings
+warnings.filterwarnings('ignore')
 
 def print_status(message):
     """Simple status printing function"""
@@ -244,13 +245,58 @@ def get_images_with_multiple_boxes(csv_path, min_boxes=2, max_boxes=3):
     return image_info
 
 
-def process_image(image_path, model, bboxes, labels, transform, output_dir):
+def safe_load_checkpoint(checkpoint_path, model):
+    """Safely load checkpoint with proper error handling"""
     try:
-        # Load and process image
-        image = Image.open(image_path).convert('RGB')
+        print_status("Loading checkpoint...")
+
+        # Try direct loading
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            print_status("Loading model state dict...")
+            state_dict = checkpoint['model_state_dict']
+        else:
+            state_dict = checkpoint
+
+        # Load state dict
+        model.load_state_dict(state_dict)
+        print_status("Checkpoint loaded successfully")
+        return True
+
+    except Exception as e:
+        print_status(f"Standard loading failed: {str(e)}")
+        try:
+            # Try alternative loading method
+            print_status("Attempting alternative loading method...")
+            with open(checkpoint_path, 'rb') as f:
+                checkpoint = torch.load(f, map_location='cpu')
+
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                model.load_state_dict(checkpoint)
+
+            print_status("Alternative loading successful")
+            return True
+
+        except Exception as e2:
+            print_status(f"Alternative loading failed: {str(e2)}")
+            return False
+
+
+def process_image(image_path, model, bboxes, labels, transform, output_dir):
+    """Process a single image"""
+    try:
+        # Convert image to RGB
+        img = cv2.imread(image_path)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(img)
+
+        # Get input tensor
         input_tensor = transform(image).unsqueeze(0)
 
-        # Get predictions and generate GradCAM
+        # Initialize GradCAM
         grad_cam = VisionTransformerGradCAM(model)
 
         # Create visualization
@@ -258,14 +304,28 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
 
         # Original image with boxes
         img_array = np.array(image)
-        img_with_boxes = Image.fromarray(img_array.copy())
-        draw = ImageDraw.Draw(img_with_boxes)
+        img_with_boxes = img_array.copy()
 
+        # Draw boxes using OpenCV instead of PIL
         colors = plt.cm.rainbow(np.linspace(0, 1, len(labels)))
         for bbox, label, color in zip(bboxes, labels, colors):
             color_rgb = tuple(int(c * 255) for c in color[:3])
-            draw.rectangle(bbox, outline=color_rgb, width=3)
-            draw.text((bbox[0], bbox[1] - 15), label, fill=color_rgb)
+            cv2.rectangle(
+                img_with_boxes,
+                (int(bbox[0]), int(bbox[1])),
+                (int(bbox[2]), int(bbox[3])),
+                color_rgb,
+                3
+            )
+            cv2.putText(
+                img_with_boxes,
+                label,
+                (int(bbox[0]), int(bbox[1] - 10)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color_rgb,
+                2
+            )
 
         axes[0, 0].imshow(img_with_boxes)
         axes[0, 0].set_title('Original with Bounding Boxes')
@@ -276,14 +336,14 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
         axes[0, 1].set_title('Original Image')
         axes[0, 1].axis('off')
 
-        # GradCAM for ground truth
+        # GradCAM visualization
+        combined_cam = np.zeros((224, 224))
         disease_names = [
             'Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration',
             'Mass', 'Nodule', 'Pneumonia', 'Pneumothorax', 'Consolidation',
             'Edema', 'Emphysema', 'Fibrosis', 'Pleural_Thickening', 'Hernia'
         ]
 
-        combined_cam = np.zeros((224, 224))
         for label in labels:
             if label in disease_names:
                 class_idx = disease_names.index(label)
@@ -291,22 +351,17 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
                 combined_cam = np.maximum(combined_cam, cam)
 
         # Overlay GradCAM
+        resized_img = cv2.resize(img_array, (224, 224))
         cam_image = np.uint8(255 * combined_cam)
-        cam_heatmap = cv2.applyColorMap(cam_image, cv2.COLORMAP_JET)
-        cam_heatmap = cv2.cvtColor(cam_heatmap, cv2.COLOR_BGR2RGB)
-        overlay = cv2.addWeighted(
-            cv2.resize(img_array, (224, 224)),
-            0.6,
-            cam_heatmap,
-            0.4,
-            0
-        )
+        heatmap = cv2.applyColorMap(cam_image, cv2.COLORMAP_JET)
 
-        axes[1, 0].imshow(overlay)
+        overlay = cv2.addWeighted(resized_img, 0.6, heatmap, 0.4, 0)
+
+        axes[1, 0].imshow(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
         axes[1, 0].set_title('GradCAM Visualization')
         axes[1, 0].axis('off')
 
-        # Predictions
+        # Model predictions
         with torch.no_grad():
             outputs = model(input_tensor)
             probs = torch.sigmoid(outputs).squeeze().numpy()
@@ -319,7 +374,7 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
         axes[1, 1].text(0.1, 0.5, pred_text, fontsize=12)
         axes[1, 1].axis('off')
 
-        # Save figure
+        # Save visualization
         plt.tight_layout()
         save_path = os.path.join(output_dir, f'gradcam_{os.path.basename(image_path)}')
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -328,63 +383,8 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
         return True
 
     except Exception as e:
-        print_status(f"Error processing {image_path}: {str(e)}")
+        print_status(f"Error processing image: {str(e)}")
         return False
-
-
-def safe_load_checkpoint(checkpoint_path, model):
-    """Safely load checkpoint with proper error handling"""
-    try:
-        print_status("Loading checkpoint...")
-
-        # Load raw state dict
-        if torch.cuda.is_available():
-            state_dict = torch.load(checkpoint_path)
-        else:
-            state_dict = torch.load(checkpoint_path, map_location=torch.device('cpu'))
-
-        # Extract model state dict
-        if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
-            model_state = state_dict['model_state_dict']
-        else:
-            model_state = state_dict
-
-        # Convert state dict to make it compatible
-        converted_state = {}
-        for k, v in model_state.items():
-            if isinstance(v, torch.Tensor):
-                converted_state[k] = v.float()
-            else:
-                try:
-                    converted_state[k] = torch.tensor(v).float()
-                except:
-                    print_status(f"Skipping conversion of {k}")
-                    converted_state[k] = v
-
-        # Load the converted state dict
-        model.load_state_dict(converted_state)
-        print_status("Checkpoint loaded successfully")
-        return True
-
-    except Exception as e:
-        print_status(f"Error loading checkpoint: {str(e)}")
-        return False
-
-def extract_state_dict(checkpoint_path):
-    """Extract state dict from checkpoint file without loading tensors"""
-    try:
-        with open(checkpoint_path, 'rb') as f:
-            # Get magic number
-            magic = torch.serialization._utils._get_magic_number(f)
-            if magic == 'PKL':
-                # Pickle file
-                return torch.load(checkpoint_path, map_location='cpu', pickle_module=pickle)
-            else:
-                # Torch file
-                return torch.load(checkpoint_path, map_location='cpu', weights_only=True)
-    except Exception as e:
-        print_status(f"Error extracting state dict: {str(e)}")
-        return None
 
 
 def main():
@@ -398,7 +398,7 @@ def main():
     image_dir = '/users/gm00051/ChestX-ray14/images'
     checkpoint = '/users/gm00051/projects/cvpr/baseline/Graph-Augmented-Vision-Transformers/scripts/checkpoints/best_model.pt'
 
-    print_status("Initializing model...")
+    print_status("Loading model...")
 
     # Initialize model
     model = VisionTransformer(
@@ -413,64 +413,38 @@ def main():
         drop_rate=0.0
     )
 
-    # Try multiple loading methods
-    loading_methods = [
-        lambda: safe_load_checkpoint(checkpoint, model),
-        lambda: model.load_state_dict(torch.load(checkpoint, map_location='cpu')['model_state_dict']),
-        lambda: model.load_state_dict(
-            torch.load(checkpoint, map_location='cpu', pickle_module=pickle)['model_state_dict'])
-    ]
-
-    success = False
-    for method in loading_methods:
-        try:
-            method()
-            success = True
-            print_status("Successfully loaded checkpoint")
-            break
-        except Exception as e:
-            print_status(f"Loading method failed: {str(e)}")
-            continue
-
-    if not success:
-        print_status("All loading methods failed. Exiting...")
+    if not safe_load_checkpoint(checkpoint, model):
+        print_status("Failed to load checkpoint. Exiting...")
         return
 
     model.eval()
     print_status("Model ready for inference")
 
-    # Define transform
+    # Transform
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225]
-        )
+        transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225])
     ])
 
-    # Get images with multiple boxes
-    print_status("Finding images with multiple boxes...")
+    # Process images
     try:
+        print_status("Reading bounding box data...")
         image_info = get_images_with_multiple_boxes(bbox_csv)
         print_status(f"Found {len(image_info)} images with multiple boxes")
-    except Exception as e:
-        print_status(f"Error reading bbox CSV: {str(e)}")
-        return
 
-    # Process each image
-    successful = 0
-    total = len(image_info)
+        successful = 0
+        total = len(image_info)
 
-    for idx, (img_name, info) in enumerate(image_info.items(), 1):
-        print_status(f"Processing image {idx}/{total}: {img_name}")
+        for idx, (img_name, info) in enumerate(image_info.items(), 1):
+            print_status(f"Processing image {idx}/{total}: {img_name}")
 
-        image_path = os.path.join(image_dir, img_name)
-        if not os.path.exists(image_path):
-            print_status(f"Image not found: {image_path}")
-            continue
+            image_path = os.path.join(image_dir, img_name)
+            if not os.path.exists(image_path):
+                print_status(f"Image not found: {image_path}")
+                continue
 
-        try:
             success = process_image(
                 image_path=image_path,
                 model=model,
@@ -482,25 +456,18 @@ def main():
 
             if success:
                 successful += 1
-                print_status(f"Successfully processed {img_name}")
-            else:
-                print_status(f"Failed to process {img_name}")
 
-        except Exception as e:
-            print_status(f"Error processing {img_name}: {str(e)}")
-            continue
+            if idx % 10 == 0:
+                print_status(f"Progress: {idx}/{total} images processed ({successful} successful)")
 
-        # Save progress periodically
-        if idx % 10 == 0:
-            print_status(f"Progress: {idx}/{total} images processed ({successful} successful)")
+        print_status(f"Processing complete! Successfully processed {successful}/{total} images")
+        print_status(f"Results saved in {output_dir}")
 
-    print_status(f"Processing complete! Successfully processed {successful}/{total} images")
-    print_status(f"Results saved in {output_dir}")
+    except Exception as e:
+        print_status(f"Error during processing: {str(e)}")
 
 
 if __name__ == '__main__':
-    import pickle
-
     try:
         main()
     except Exception as e:
