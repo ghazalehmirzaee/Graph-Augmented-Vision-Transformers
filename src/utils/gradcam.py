@@ -290,16 +290,128 @@ def get_images_with_multiple_boxes(csv_path, min_boxes=2, max_boxes=3):
     return image_info
 
 
+# def process_image(image_path, model, bboxes, labels, transform, output_dir):
+#     """Process a single image"""
+#     try:
+#         # Convert image to RGB
+#         img = cv2.imread(image_path)
+#         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+#         image = Image.fromarray(img)
+#
+#         # Get input tensor
+#         input_tensor = transform(image).unsqueeze(0)
+#
+#         # Initialize GradCAM
+#         grad_cam = VisionTransformerGradCAM(model)
+#
+#         # Create visualization
+#         fig, axes = plt.subplots(2, 2, figsize=(20, 20))
+#
+#         # Original image with boxes
+#         img_array = np.array(image)
+#         img_with_boxes = img_array.copy()
+#
+#         # Draw boxes using OpenCV instead of PIL
+#         colors = plt.cm.rainbow(np.linspace(0, 1, len(labels)))
+#         for bbox, label, color in zip(bboxes, labels, colors):
+#             color_rgb = tuple(int(c * 255) for c in color[:3])
+#             cv2.rectangle(
+#                 img_with_boxes,
+#                 (int(bbox[0]), int(bbox[1])),
+#                 (int(bbox[2]), int(bbox[3])),
+#                 color_rgb,
+#                 3
+#             )
+#             cv2.putText(
+#                 img_with_boxes,
+#                 label,
+#                 (int(bbox[0]), int(bbox[1] - 10)),
+#                 cv2.FONT_HERSHEY_SIMPLEX,
+#                 0.5,
+#                 color_rgb,
+#                 2
+#             )
+#
+#         axes[0, 0].imshow(img_with_boxes)
+#         axes[0, 0].set_title('Original with Bounding Boxes')
+#         axes[0, 0].axis('off')
+#
+#         # Original image
+#         axes[0, 1].imshow(img_array)
+#         axes[0, 1].set_title('Original Image')
+#         axes[0, 1].axis('off')
+#
+#         # GradCAM visualization
+#         combined_cam = np.zeros((224, 224))
+#         disease_names = [
+#             'Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration',
+#             'Mass', 'Nodule', 'Pneumonia', 'Pneumothorax', 'Consolidation',
+#             'Edema', 'Emphysema', 'Fibrosis', 'Pleural_Thickening', 'Hernia'
+#         ]
+#
+#         for label in labels:
+#             if label in disease_names:
+#                 class_idx = disease_names.index(label)
+#                 cam = grad_cam(input_tensor, class_idx)
+#                 combined_cam = np.maximum(combined_cam, cam)
+#
+#         # Overlay GradCAM
+#         resized_img = cv2.resize(img_array, (224, 224))
+#         cam_image = np.uint8(255 * combined_cam)
+#         heatmap = cv2.applyColorMap(cam_image, cv2.COLORMAP_JET)
+#
+#         overlay = cv2.addWeighted(resized_img, 0.6, heatmap, 0.4, 0)
+#
+#         axes[1, 0].imshow(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
+#         axes[1, 0].set_title('GradCAM Visualization')
+#         axes[1, 0].axis('off')
+#
+#         # Model predictions
+#         with torch.no_grad():
+#             outputs = model(input_tensor)
+#             probs = torch.sigmoid(outputs).squeeze().numpy()
+#
+#         pred_text = "Predictions:\n"
+#         for i, (prob, disease) in enumerate(zip(probs, disease_names)):
+#             if prob > 0.5:
+#                 pred_text += f"{disease}: {prob:.3f}\n"
+#
+#         axes[1, 1].text(0.1, 0.5, pred_text, fontsize=12)
+#         axes[1, 1].axis('off')
+#
+#         # Save visualization
+#         plt.tight_layout()
+#         save_path = os.path.join(output_dir, f'gradcam_{os.path.basename(image_path)}')
+#         plt.savefig(save_path, dpi=300, bbox_inches='tight')
+#         plt.close()
+#
+#         return True
+#
+#     except Exception as e:
+#         print_status(f"Error processing image: {str(e)}")
+#         return False
+
 def process_image(image_path, model, bboxes, labels, transform, output_dir):
     """Process a single image"""
     try:
         # Convert image to RGB
         img = cv2.imread(image_path)
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        image = Image.fromarray(img)
+        if img is None:
+            raise ValueError(f"Image not found or failed to load: {image_path}")
 
-        # Get input tensor
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+        # Resize the image to 224x224 to ensure correct shape
+        img_resized = cv2.resize(img, (224, 224))
+
+        # Convert resized image to a PIL image
+        image = Image.fromarray(img_resized)
+
+        # Get input tensor using the transformation pipeline
         input_tensor = transform(image).unsqueeze(0)
+
+        # Add debugging print statements to check tensor shape
+        print_status(f"Input tensor shape: {input_tensor.shape}")
 
         # Initialize GradCAM
         grad_cam = VisionTransformerGradCAM(model)
@@ -307,9 +419,8 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
         # Create visualization
         fig, axes = plt.subplots(2, 2, figsize=(20, 20))
 
-        # Original image with boxes
-        img_array = np.array(image)
-        img_with_boxes = img_array.copy()
+        # Original image with boxes (resized for visualization)
+        img_with_boxes = img_resized.copy()
 
         # Draw boxes using OpenCV instead of PIL
         colors = plt.cm.rainbow(np.linspace(0, 1, len(labels)))
@@ -336,9 +447,9 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
         axes[0, 0].set_title('Original with Bounding Boxes')
         axes[0, 0].axis('off')
 
-        # Original image
-        axes[0, 1].imshow(img_array)
-        axes[0, 1].set_title('Original Image')
+        # Original image (resized)
+        axes[0, 1].imshow(img_resized)
+        axes[0, 1].set_title('Resized Original Image')
         axes[0, 1].axis('off')
 
         # GradCAM visualization
@@ -356,11 +467,10 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
                 combined_cam = np.maximum(combined_cam, cam)
 
         # Overlay GradCAM
-        resized_img = cv2.resize(img_array, (224, 224))
         cam_image = np.uint8(255 * combined_cam)
         heatmap = cv2.applyColorMap(cam_image, cv2.COLORMAP_JET)
 
-        overlay = cv2.addWeighted(resized_img, 0.6, heatmap, 0.4, 0)
+        overlay = cv2.addWeighted(img_resized, 0.6, heatmap, 0.4, 0)
 
         axes[1, 0].imshow(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
         axes[1, 0].set_title('GradCAM Visualization')
