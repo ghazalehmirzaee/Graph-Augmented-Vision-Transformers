@@ -311,6 +311,121 @@ class VisionTransformerGradCAM:
 
         return cam if cam is not None else np.zeros((224, 224))
 
+#
+# def process_image(image_path, model, bboxes, labels, transform, output_dir):
+#     try:
+#         # Load and preprocess image
+#         img = cv2.imread(image_path)
+#         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+#
+#         # Create figure
+#         plt.figure(figsize=(20, 8))
+#
+#         # Plot original image with boxes
+#         plt.subplot(1, 2, 1)
+#         img_with_boxes = img.copy()
+#         colors = plt.cm.rainbow(np.linspace(0, 1, len(labels)))
+#
+#         for bbox, label, color in zip(bboxes, labels, colors):
+#             color_rgb = tuple(int(c * 255) for c in color[:3])
+#             cv2.rectangle(
+#                 img_with_boxes,
+#                 (int(bbox[0]), int(bbox[1])),
+#                 (int(bbox[2]), int(bbox[3])),
+#                 color_rgb,
+#                 2
+#             )
+#
+#             # Add label with background
+#             text_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
+#             cv2.rectangle(
+#                 img_with_boxes,
+#                 (int(bbox[0]), int(bbox[1] - text_size[1] - 4)),
+#                 (int(bbox[0] + text_size[0]), int(bbox[1])),
+#                 color_rgb,
+#                 -1
+#             )
+#             cv2.putText(
+#                 img_with_boxes,
+#                 label,
+#                 (int(bbox[0]), int(bbox[1] - 5)),
+#                 cv2.FONT_HERSHEY_SIMPLEX,
+#                 0.6,
+#                 (255, 255, 255),
+#                 1
+#             )
+#
+#         plt.imshow(img_with_boxes)
+#         plt.title("Original with Ground Truth", fontsize=12)
+#         plt.axis('off')
+#
+#         # Generate GradCAM
+#         plt.subplot(1, 2, 2)
+#         input_tensor = transform(Image.fromarray(img)).unsqueeze(0)
+#         grad_cam = VisionTransformerGradCAM(model)
+#
+#         # Get predictions
+#         with torch.no_grad():
+#             predictions = torch.sigmoid(model(input_tensor)).squeeze()
+#
+#         disease_names = [
+#             'Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration',
+#             'Mass', 'Nodule', 'Pneumonia', 'Pneumothorax', 'Consolidation',
+#             'Edema', 'Emphysema', 'Fibrosis', 'Pleural_Thickening', 'Hernia'
+#         ]
+#
+#         # Generate individual GradCAMs for each predicted disease
+#         combined_cam = np.zeros((224, 224))
+#         pred_text = "Predictions:\n"
+#
+#         for idx, (prob, disease) in enumerate(zip(predictions, disease_names)):
+#             if prob > 0.5:  # Only for predicted diseases
+#                 # In process_image function
+#                 # cam = grad_cam(input_tensor, idx)
+#                 # if cam is None:
+#                 #     print_status(f"Skipping image {img_name} due to missing Grad-CAM output")
+#                 #     continue  # Skip processing this image if Grad-CAM fails
+#
+#                 cam = grad_cam(input_tensor, idx)
+#                 # Weight the CAM by prediction confidence
+#                 cam = cam * float(prob)
+#                 combined_cam = np.maximum(combined_cam, cam)
+#                 pred_text += f"{disease}: {prob:.3f}\n"
+#
+#         # Create heatmap overlay
+#         heatmap = cv2.applyColorMap(np.uint8(255 * combined_cam), cv2.COLORMAP_JET)
+#         heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+#
+#         # Resize original image
+#         img_resized = cv2.resize(img, (224, 224))
+#
+#         # Create overlay with adaptive alpha
+#         alpha = combined_cam[..., np.newaxis]  # Make alpha channel same shape as RGB
+#         overlay = img_resized * (1 - alpha * 0.7) + heatmap * (alpha * 0.7)
+#         overlay = overlay.astype(np.uint8)
+#
+#         plt.imshow(overlay)
+#         plt.title("GradCAM (Predicted Diseases)", fontsize=12)
+#         plt.axis('off')
+#
+#         # Add predictions text
+#         plt.text(1.05, 0.5, pred_text, transform=plt.gca().transAxes,
+#                  fontsize=10, verticalalignment='center')
+#
+#         # Save visualization
+#         plt.tight_layout()
+#         save_path = os.path.join(output_dir, f'analysis_{os.path.basename(image_path)}')
+#         plt.savefig(save_path, dpi=300, bbox_inches='tight')
+#         plt.close()
+#
+#         return True
+#
+#     except Exception as e:
+#         print_status(f"Error processing image: {str(e)}")
+#         import traceback
+#         traceback.print_exc()
+#         return False
+#
 
 def process_image(image_path, model, bboxes, labels, transform, output_dir):
     try:
@@ -380,52 +495,51 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
 
         for idx, (prob, disease) in enumerate(zip(predictions, disease_names)):
             if prob > 0.5:  # Only for predicted diseases
-                # In process_image function
-                # cam = grad_cam(input_tensor, idx)
-                # if cam is None:
-                #     print_status(f"Skipping image {img_name} due to missing Grad-CAM output")
-                #     continue  # Skip processing this image if Grad-CAM fails
-
                 cam = grad_cam(input_tensor, idx)
+                # Skip if cam is None
+                if cam is None:
+                    print_status(f"Skipping {disease} for image {image_path} due to missing Grad-CAM output.")
+                    continue
                 # Weight the CAM by prediction confidence
                 cam = cam * float(prob)
                 combined_cam = np.maximum(combined_cam, cam)
                 pred_text += f"{disease}: {prob:.3f}\n"
 
-        # Create heatmap overlay
-        heatmap = cv2.applyColorMap(np.uint8(255 * combined_cam), cv2.COLORMAP_JET)
-        heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+        # Create heatmap overlay if combined_cam is not empty
+        if np.any(combined_cam):
+            heatmap = cv2.applyColorMap(np.uint8(255 * combined_cam), cv2.COLORMAP_JET)
+            heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
 
-        # Resize original image
-        img_resized = cv2.resize(img, (224, 224))
+            # Resize original image
+            img_resized = cv2.resize(img, (224, 224))
 
-        # Create overlay with adaptive alpha
-        alpha = combined_cam[..., np.newaxis]  # Make alpha channel same shape as RGB
-        overlay = img_resized * (1 - alpha * 0.7) + heatmap * (alpha * 0.7)
-        overlay = overlay.astype(np.uint8)
+            # Create overlay with adaptive alpha
+            alpha = combined_cam[..., np.newaxis]  # Make alpha channel same shape as RGB
+            overlay = img_resized * (1 - alpha * 0.7) + heatmap * (alpha * 0.7)
+            overlay = overlay.astype(np.uint8)
 
-        plt.imshow(overlay)
-        plt.title("GradCAM (Predicted Diseases)", fontsize=12)
-        plt.axis('off')
+            plt.imshow(overlay)
+            plt.title("GradCAM (Predicted Diseases)", fontsize=12)
+            plt.axis('off')
 
-        # Add predictions text
-        plt.text(1.05, 0.5, pred_text, transform=plt.gca().transAxes,
-                 fontsize=10, verticalalignment='center')
+            # Add predictions text
+            plt.text(1.05, 0.5, pred_text, transform=plt.gca().transAxes,
+                     fontsize=10, verticalalignment='center')
 
-        # Save visualization
-        plt.tight_layout()
-        save_path = os.path.join(output_dir, f'analysis_{os.path.basename(image_path)}')
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        plt.close()
+            # Save visualization
+            plt.tight_layout()
+            save_path = os.path.join(output_dir, f'analysis_{os.path.basename(image_path)}')
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.close()
 
         return True
 
     except Exception as e:
         print_status(f"Error processing image: {str(e)}")
-        import traceback
         traceback.print_exc()
         return False
-    
+
+
 
 def get_images_with_multiple_boxes(csv_path, min_boxes=2, max_boxes=3):
     df = pd.read_csv(csv_path)
