@@ -204,6 +204,7 @@ class VisionTransformerGradCAM:
         self.model = model
         self.activations = None
         self.gradients = None
+        self.attention_maps = None
 
     def save_activation(self, module, input, output):
         self.activations = output
@@ -211,71 +212,75 @@ class VisionTransformerGradCAM:
     def save_gradient(self, module, grad_input, grad_output):
         self.gradients = grad_output[0]
 
+    def save_attention(self, module, input, output):
+        # Save attention maps from the last attention layer
+        self.attention_maps = module.attn.attn.detach()
+
     def __call__(self, input_tensor, target_category):
-        """Generate CAM for the specified target category with improved visualization"""
-        B = input_tensor.size(0)  # Batch size
+        """Generate focused GradCAM using attention and gradients"""
+        B = input_tensor.size(0)
 
         # Register hooks
         handle_activation = self.model.blocks[-1].register_forward_hook(self.save_activation)
         handle_gradient = self.model.blocks[-1].register_full_backward_hook(self.save_gradient)
+        handle_attention = self.model.blocks[-1].register_forward_hook(self.save_attention)
 
         try:
             # Forward pass
             model_output = self.model(input_tensor)
 
+            # Get target category if not provided
             if target_category is None:
                 target_category = model_output.argmax(dim=1)
 
-            # Zero gradients
+            # Zero gradients and perform backward pass
             self.model.zero_grad()
-
-            # Backward pass for target category
             one_hot = torch.zeros_like(model_output)
             one_hot[0][target_category] = 1
             model_output.backward(gradient=one_hot, retain_graph=True)
+
+            # Get attention from CLS token to patches
+            attn_weights = self.attention_maps[0, :, 0, 1:]  # [num_heads, patch_size]
 
             # Get gradients and activations
             gradients = self.gradients[:, 1:, :]  # Remove CLS token
             activations = self.activations[:, 1:, :]  # Remove CLS token
 
-            # Calculate attention weights
-            weights = torch.mean(gradients, dim=-1)  # Global average pooling
+            # Pool gradients
+            pooled_gradients = torch.mean(gradients, dim=[0, 1])
 
-            # Reshape activations and weights
+            # Weight activations by gradients
+            weighted_activations = activations * pooled_gradients.unsqueeze(0).unsqueeze(0)
+
+            # Combine with attention
             n_patches = int(np.sqrt(activations.shape[1]))
-            activations = activations.reshape(B, n_patches, n_patches, -1)
-            weights = weights.reshape(B, n_patches, n_patches)
+            cam = torch.mean(weighted_activations, dim=-1).reshape(-1, n_patches, n_patches)
 
-            # Apply weights to activation maps
-            cam = torch.zeros(B, n_patches, n_patches, device=activations.device)
-            for b in range(B):
-                for i in range(n_patches):
-                    for j in range(n_patches):
-                        cam[b, i, j] = torch.sum(weights[b, i, j] * activations[b, i, j])
+            # Weight by attention maps
+            attn_weights = torch.mean(attn_weights, dim=0).reshape(n_patches, n_patches)
+            cam = cam * attn_weights
 
             # Apply ReLU and normalize
             cam = F.relu(cam)
-
-            # Interpolate to input resolution
             cam = F.interpolate(
                 cam.unsqueeze(1),
                 size=(224, 224),
                 mode='bicubic',
                 align_corners=False
-            ).squeeze(1)
+            ).squeeze()
 
-            # Normalize and enhance contrast
+            # Convert to numpy and enhance
             cam = cam.detach().cpu().numpy()
-            cam = cam[0]  # Take first batch element
-
-            # Enhance contrast using histogram equalization
             cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
+
+            # Enhance contrast
             cam = (cam * 255).astype(np.uint8)
             cam = cv2.equalizeHist(cam)
+            cam = cv2.GaussianBlur(cam, (5, 5), 0)
             cam = cam.astype(float) / 255.0
 
             # Apply gamma correction to enhance high activation areas
-            gamma = 0.5
+            gamma = 0.4
             cam = np.power(cam, gamma)
 
             return cam
@@ -283,6 +288,38 @@ class VisionTransformerGradCAM:
         finally:
             handle_activation.remove()
             handle_gradient.remove()
+            handle_attention.remove()
+
+
+def process_random_images(image_info, image_dir, model, transform, output_dir, num_images=20):
+    """Process a random subset of images"""
+    # Select random images
+    image_names = list(image_info.keys())
+    random_images = np.random.choice(image_names, min(num_images, len(image_names)), replace=False)
+
+    successful = 0
+    for idx, img_name in enumerate(random_images, 1):
+        print_status(f"Processing image {idx}/{num_images}: {img_name}")
+
+        image_path = os.path.join(image_dir, img_name)
+        if not os.path.exists(image_path):
+            print_status(f"Image not found: {image_path}")
+            continue
+
+        success = process_image(
+            image_path=image_path,
+            model=model,
+            bboxes=image_info[img_name]['bboxes'],
+            labels=image_info[img_name]['labels'],
+            transform=transform,
+            output_dir=output_dir
+        )
+
+        if success:
+            successful += 1
+
+    print_status(f"Processing complete! Successfully processed {successful}/{num_images} images")
+
 
 
 def process_image(image_path, model, bboxes, labels, transform, output_dir):
@@ -399,7 +436,7 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
         import traceback
         traceback.print_exc()
         return False
-    
+
 
 
 def get_images_with_multiple_boxes(csv_path, min_boxes=2, max_boxes=3):
@@ -553,6 +590,96 @@ def safe_load_checkpoint(checkpoint_path, model):
 def debug_tensor_shape(tensor, name):
     print_status(f"{name} shape: {tensor.shape}")
 
+#
+# def main():
+#     # Create output directory
+#     output_dir = 'outputs'
+#     os.makedirs(output_dir, exist_ok=True)
+#     print_status(f"Created output directory: {output_dir}")
+#
+#     # Paths
+#     bbox_csv = '/users/gm00051/ChestX-ray14/labels/BBox_List_2017.csv'
+#     image_dir = '/users/gm00051/ChestX-ray14/images'
+#     checkpoint = '/users/gm00051/projects/cvpr/baseline/Graph-Augmented-Vision-Transformers/scripts/checkpoints/best_model.pt'
+#
+#     print_status("Loading model...")
+#
+#     # Initialize model
+#     model = VisionTransformer(
+#         img_size=224,
+#         patch_size=16,
+#         in_chans=3,
+#         num_classes=14,
+#         embed_dim=768,
+#         depth=12,
+#         num_heads=12,
+#         mlp_ratio=4.0,
+#         drop_rate=0.0
+#     )
+#
+#     # Try loading checkpoint
+#     if not safe_load_checkpoint(checkpoint, model):
+#         print_status("Failed to load checkpoint. Exiting...")
+#         return
+#
+#     model.eval()
+#     print_status("Model ready for inference")
+#
+#     # Transform
+#     transform = transforms.Compose([
+#         transforms.Resize((224, 224)),
+#         transforms.ToTensor(),
+#         transforms.Normalize(mean=[0.485, 0.456, 0.406],
+#                              std=[0.229, 0.224, 0.225])
+#     ])
+#
+#     # Process images
+#     try:
+#         print_status("Reading bounding box data...")
+#         image_info = get_images_with_multiple_boxes(bbox_csv)
+#         print_status(f"Found {len(image_info)} images with multiple boxes")
+#
+#         successful = 0
+#         total = len(image_info)
+#
+#         for idx, (img_name, info) in enumerate(image_info.items(), 1):
+#             print_status(f"Processing image {idx}/{total}: {img_name}")
+#
+#             image_path = os.path.join(image_dir, img_name)
+#             if not os.path.exists(image_path):
+#                 print_status(f"Image not found: {image_path}")
+#                 continue
+#
+#             success = process_image(
+#                 image_path=image_path,
+#                 model=model,
+#                 bboxes=info['bboxes'],
+#                 labels=info['labels'],
+#                 transform=transform,
+#                 output_dir=output_dir
+#             )
+#
+#             if success:
+#                 successful += 1
+#
+#             if idx % 10 == 0:
+#                 print_status(f"Progress: {idx}/{total} images processed ({successful} successful)")
+#
+#         print_status(f"Processing complete! Successfully processed {successful}/{total} images")
+#         print_status(f"Results saved in {output_dir}")
+#
+#     except Exception as e:
+#         print_status(f"Error during processing: {str(e)}")
+#
+#
+# if __name__ == '__main__':
+#     try:
+#         main()
+#     except Exception as e:
+#         print_status(f"Fatal error: {str(e)}")
+#
+#
+
 
 def main():
     # Create output directory
@@ -580,7 +707,7 @@ def main():
         drop_rate=0.0
     )
 
-    # Try loading checkpoint
+    # Load checkpoint
     if not safe_load_checkpoint(checkpoint, model):
         print_status("Failed to load checkpoint. Exiting...")
         return
@@ -602,37 +729,20 @@ def main():
         image_info = get_images_with_multiple_boxes(bbox_csv)
         print_status(f"Found {len(image_info)} images with multiple boxes")
 
-        successful = 0
-        total = len(image_info)
-
-        for idx, (img_name, info) in enumerate(image_info.items(), 1):
-            print_status(f"Processing image {idx}/{total}: {img_name}")
-
-            image_path = os.path.join(image_dir, img_name)
-            if not os.path.exists(image_path):
-                print_status(f"Image not found: {image_path}")
-                continue
-
-            success = process_image(
-                image_path=image_path,
-                model=model,
-                bboxes=info['bboxes'],
-                labels=info['labels'],
-                transform=transform,
-                output_dir=output_dir
-            )
-
-            if success:
-                successful += 1
-
-            if idx % 10 == 0:
-                print_status(f"Progress: {idx}/{total} images processed ({successful} successful)")
-
-        print_status(f"Processing complete! Successfully processed {successful}/{total} images")
-        print_status(f"Results saved in {output_dir}")
+        # Process random subset of images
+        process_random_images(
+            image_info=image_info,
+            image_dir=image_dir,
+            model=model,
+            transform=transform,
+            output_dir=output_dir,
+            num_images=20
+        )
 
     except Exception as e:
         print_status(f"Error during processing: {str(e)}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == '__main__':
@@ -641,3 +751,4 @@ if __name__ == '__main__':
     except Exception as e:
         print_status(f"Fatal error: {str(e)}")
 
+        
