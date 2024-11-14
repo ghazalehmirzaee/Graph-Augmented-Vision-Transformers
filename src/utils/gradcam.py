@@ -10,16 +10,13 @@ from pytorch_grad_cam.utils.image import show_cam_on_image
 import cv2
 from src.models.vit import VisionTransformer
 from collections import defaultdict
-import logging
+from datetime import datetime
 
 
-def setup_logging():
-    """Setup logging configuration"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s'
-    )
-    return logging.getLogger(__name__)
+def print_log(message):
+    """Simple logging function"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}")
 
 
 def get_images_with_multiple_boxes(csv_path, min_boxes=2, max_boxes=3):
@@ -105,7 +102,7 @@ def load_model(checkpoint_path):
     return VisionTransformerWrapper(model)
 
 
-def process_single_image(image_path, model, bboxes, labels, transform, output_dir, logger):
+def process_single_image(image_path, model, bboxes, labels, transform, output_dir):
     """Process a single image and generate visualizations"""
     try:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -209,22 +206,20 @@ def process_single_image(image_path, model, bboxes, labels, transform, output_di
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         plt.close()
 
-        logger.info(f"Successfully processed {image_name}")
+        print_log(f"Successfully processed {image_name}")
         return True
 
     except Exception as e:
-        logger.error(f"Error processing {os.path.basename(image_path)}: {str(e)}")
+        print_log(f"Error processing {os.path.basename(image_path)}: {str(e)}")
         return False
 
 
 def main():
-    # Setup logging
-    logger = setup_logging()
-
     # Create output directory
     output_dir = 'outputs'
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
+        print_log(f"Created output directory: {output_dir}")
 
     # Paths
     checkpoint_path = '/users/gm00051/projects/cvpr/baseline/Graph-Augmented-Vision-Transformers/scripts/checkpoints/checkpoint_epoch_82_auc_0.7225.pt'
@@ -232,7 +227,7 @@ def main():
     images_dir = '/users/gm00051/ChestX-ray14/images'
 
     # Load model
-    logger.info("Loading model...")
+    print_log("Loading model...")
     model = load_model(checkpoint_path)
 
     # Define transform
@@ -244,18 +239,18 @@ def main():
     ])
 
     # Get images with multiple bounding boxes
-    logger.info("Finding images with multiple bounding boxes...")
+    print_log("Finding images with multiple bounding boxes...")
     image_info = get_images_with_multiple_boxes(bbox_csv_path)
-    logger.info(f"Found {len(image_info)} images with 2-3 bounding boxes")
+    print_log(f"Found {len(image_info)} images with 2-3 bounding boxes")
 
     # Process each image
     successful = 0
     for image_filename, info in image_info.items():
-        logger.info(f"Processing {image_filename}...")
+        print_log(f"Processing {image_filename}...")
         image_path = os.path.join(images_dir, image_filename)
 
         if not os.path.exists(image_path):
-            logger.warning(f"Image not found: {image_path}")
+            print_log(f"Image not found: {image_path}")
             continue
 
         success = process_single_image(
@@ -264,15 +259,14 @@ def main():
             bboxes=info['bboxes'],
             labels=info['labels'],
             transform=transform,
-            output_dir=output_dir,
-            logger=logger
+            output_dir=output_dir
         )
 
         if success:
             successful += 1
 
-    logger.info(f"Processing complete. Successfully processed {successful}/{len(image_info)} images")
-    logger.info(f"Results saved in {output_dir}")
+    print_log(f"Processing complete. Successfully processed {successful}/{len(image_info)} images")
+    print_log(f"Results saved in {output_dir}")
 
 
 if __name__ == '__main__':
