@@ -13,7 +13,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw
-import pickle
+import pickle5 as pickle
 import io
 import types
 
@@ -392,90 +392,127 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
         return False
 
 
+# def safe_load_checkpoint(checkpoint_path, model):
+#     """Safely load checkpoint with numpy fixes"""
+#     print_status("Loading checkpoint...")
+#
+#     try:
+#         # First attempt: Load with custom unpickler
+#         with open(checkpoint_path, 'rb') as f:
+#             checkpoint = load_tensor_from_buffer(f)
+#
+#         if checkpoint is not None:
+#             if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+#                 state_dict = checkpoint['model_state_dict']
+#             else:
+#                 state_dict = checkpoint
+#
+#             # Fix any numpy values
+#             state_dict = fix_state_dict(state_dict)
+#
+#             # Load state dict
+#             model.load_state_dict(state_dict)
+#             model.load_state_dict(state_dict, strict=False)
+#
+
+#             print_status("Successfully loaded checkpoint")
+#             return True
+#
+#     except Exception as e:
+#         print_status(f"First attempt failed: {str(e)}")
+#
+#     try:
+#         # Second attempt: Load with memory mapping
+#         print_status("Attempting memory-mapped loading...")
+#         state_dict = {}
+#
+#         with open(checkpoint_path, 'rb') as f:
+#             # Skip magic number and protocol
+#             f.seek(2)
+#
+#             try:
+#                 data = torch.load(
+#                     f,
+#                     map_location='cpu',
+#                     pickle_module=pickle,
+#                     weights_only=True
+#                 )
+#
+#                 if isinstance(data, dict) and 'model_state_dict' in data:
+#                     state_dict = data['model_state_dict']
+#                 else:
+#                     state_dict = data
+#
+#                 model.load_state_dict(state_dict)
+#                 print_status("Successfully loaded checkpoint using memory mapping")
+#                 return True
+#
+#             except Exception as inner_e:
+#                 print_status(f"Memory-mapped loading failed: {str(inner_e)}")
+#
+#     except Exception as e:
+#         print_status(f"Second attempt failed: {str(e)}")
+#
+#     try:
+#         # Third attempt: Raw file reading
+#         print_status("Attempting raw file reading...")
+#         with open(checkpoint_path, 'rb') as f:
+#             content = f.read()
+#
+#         # Try to load from memory buffer
+#         buffer = io.BytesIO(content)
+#         data = load_tensor_from_buffer(buffer)
+#
+#         if data is not None:
+#             if isinstance(data, dict) and 'model_state_dict' in data:
+#                 state_dict = data['model_state_dict']
+#             else:
+#                 state_dict = data
+#
+#             state_dict = fix_state_dict(state_dict)
+#             model.load_state_dict(state_dict)
+#             print_status("Successfully loaded checkpoint using raw reading")
+#             return True
+#
+#     except Exception as e:
+#         print_status(f"Third attempt failed: {str(e)}")
+#
+#     print_status("All loading attempts failed")
+#     return False
+
+
+import torch
+from datetime import datetime
+
+def print_status(message):
+    """Simple status printing function"""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{timestamp}] {message}", flush=True)
+
 def safe_load_checkpoint(checkpoint_path, model):
-    """Safely load checkpoint with numpy fixes"""
+    """Safely load checkpoint using torch.load"""
     print_status("Loading checkpoint...")
 
     try:
-        # First attempt: Load with custom unpickler
-        with open(checkpoint_path, 'rb') as f:
-            checkpoint = load_tensor_from_buffer(f)
+        # Attempt to load the checkpoint file using torch.load
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
 
-        if checkpoint is not None:
-            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                state_dict = checkpoint['model_state_dict']
-            else:
-                state_dict = checkpoint
+        # Extract state_dict if it exists, otherwise assume the checkpoint itself is the state_dict
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+        else:
+            state_dict = checkpoint
 
-            # Fix any numpy values
-            state_dict = fix_state_dict(state_dict)
-
-            # Load state dict
-            model.load_state_dict(state_dict)
-            print_status("Successfully loaded checkpoint")
-            return True
+        # Load the state dictionary into the model
+        model.load_state_dict(state_dict)
+        print_status("Successfully loaded checkpoint")
+        return True
 
     except Exception as e:
-        print_status(f"First attempt failed: {str(e)}")
+        # Handle any errors during loading
+        print_status(f"Failed to load checkpoint: {str(e)}")
+        return False
 
-    try:
-        # Second attempt: Load with memory mapping
-        print_status("Attempting memory-mapped loading...")
-        state_dict = {}
-
-        with open(checkpoint_path, 'rb') as f:
-            # Skip magic number and protocol
-            f.seek(2)
-
-            try:
-                data = torch.load(
-                    f,
-                    map_location='cpu',
-                    pickle_module=pickle,
-                    weights_only=True
-                )
-
-                if isinstance(data, dict) and 'model_state_dict' in data:
-                    state_dict = data['model_state_dict']
-                else:
-                    state_dict = data
-
-                model.load_state_dict(state_dict)
-                print_status("Successfully loaded checkpoint using memory mapping")
-                return True
-
-            except Exception as inner_e:
-                print_status(f"Memory-mapped loading failed: {str(inner_e)}")
-
-    except Exception as e:
-        print_status(f"Second attempt failed: {str(e)}")
-
-    try:
-        # Third attempt: Raw file reading
-        print_status("Attempting raw file reading...")
-        with open(checkpoint_path, 'rb') as f:
-            content = f.read()
-
-        # Try to load from memory buffer
-        buffer = io.BytesIO(content)
-        data = load_tensor_from_buffer(buffer)
-
-        if data is not None:
-            if isinstance(data, dict) and 'model_state_dict' in data:
-                state_dict = data['model_state_dict']
-            else:
-                state_dict = data
-
-            state_dict = fix_state_dict(state_dict)
-            model.load_state_dict(state_dict)
-            print_status("Successfully loaded checkpoint using raw reading")
-            return True
-
-    except Exception as e:
-        print_status(f"Third attempt failed: {str(e)}")
-
-    print_status("All loading attempts failed")
-    return False
 
 
 def main():

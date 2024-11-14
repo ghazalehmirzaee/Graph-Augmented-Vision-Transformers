@@ -69,4 +69,3 @@ if __name__ == '__main__':
     checkpoint_path = '/users/gm00051/projects/cvpr/baseline/Graph-Augmented-Vision-Transformers/scripts/checkpoints/best_model.pt'
     test_checkpoint(checkpoint_path)
 
-    
