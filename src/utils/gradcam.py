@@ -1,19 +1,27 @@
-# Import necessary packages
-import os
 import sys
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-from PIL import Image, ImageDraw
-import torchvision.transforms as transforms
-import cv2
+import os
 from datetime import datetime
-from collections import defaultdict
 
-# Add the project root to Python path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+# Add the project root to the Python path
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(project_root)
 
-# Import local modules
+# Import the rest of the packages
+import numpy as np
+import pandas as pd
+from PIL import Image, ImageDraw
+import cv2
+
+# Import torch first
+import torch
+import torchvision.transforms as transforms
+
+# Import matplotlib last
+import matplotlib
+
+matplotlib.use('Agg')  # Use non-interactive backend
+import matplotlib.pyplot as plt
+
 from src.models.vit import VisionTransformer
 
 
@@ -39,8 +47,8 @@ class VisionTransformerGradCAM:
 
     def __call__(self, input_tensor, target_category):
         # Register hooks
-        handle_activation = self.model.vit.blocks[-1].register_forward_hook(self.get_activations)
-        handle_gradient = self.model.vit.blocks[-1].register_full_backward_hook(self.get_gradients)
+        handle_activation = self.model.blocks[-1].register_forward_hook(self.get_activations)
+        handle_gradient = self.model.blocks[-1].register_full_backward_hook(self.get_gradients)
 
         # Forward pass
         output = self.model(input_tensor)
@@ -102,8 +110,6 @@ def get_images_with_multiple_boxes(csv_path, min_boxes=2, max_boxes=3):
 def process_image(image_path, model, bboxes, labels, transform, output_dir):
     """Process a single image"""
     try:
-        # Import torch here to avoid the logging issue
-        import torch
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
         # Load and preprocess image
@@ -201,8 +207,6 @@ def main():
     checkpoint = '/users/gm00051/projects/cvpr/baseline/Graph-Augmented-Vision-Transformers/scripts/checkpoints/checkpoint_epoch_82_auc_0.7225.pt'
 
     print_status("Loading model...")
-    # Import torch here to avoid the logging issue
-    import torch
     model = VisionTransformer(
         img_size=224,
         patch_size=16,
