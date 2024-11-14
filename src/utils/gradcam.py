@@ -213,6 +213,8 @@ class VisionTransformerGradCAM:
 
     def __call__(self, input_tensor, target_category):
         """Generate CAM for the specified target category"""
+        B = input_tensor.size(0)  # Batch size
+
         # Register hooks
         handle_activation = self.model.blocks[-1].register_forward_hook(self.save_activation)
         handle_gradient = self.model.blocks[-1].register_full_backward_hook(self.save_gradient)
@@ -232,39 +234,36 @@ class VisionTransformerGradCAM:
             model_output.backward(gradient=one_hot, retain_graph=True)
 
             # Get gradients and activations
-            gradients = self.gradients
-            activations = self.activations
-
-            # Remove hooks
-            handle_activation.remove()
-            handle_gradient.remove()
+            gradients = self.gradients  # [B, N, D]
+            activations = self.activations  # [B, N, D]
 
             # Calculate attention weights
-            weights = torch.mean(gradients, dim=1)  # [B, H*W]
-            weights = weights.reshape(-1, 14, 14)  # Reshape to match feature map size
+            weights = gradients.mean(dim=-1, keepdim=True)  # [B, N, 1]
 
             # Get activation maps (excluding CLS token)
+            n_patches = int((activations.shape[1] - 1) ** 0.5)  # Remove CLS token
             activation_maps = activations[:, 1:, :]  # Remove CLS token
-            activation_maps = activation_maps.reshape(-1, 14, 14, activations.shape[-1])
-            activation_maps = activation_maps.permute(0, 3, 1, 2)  # [B, C, H, W]
+            activation_maps = activation_maps.view(B, n_patches, n_patches, -1)  # [B, H, W, D]
+            weights = weights[:, 1:, :].view(B, n_patches, n_patches, 1)  # [B, H, W, 1]
 
-            # Compute weighted combination of activation maps
-            cam = torch.zeros((1, 14, 14), device=activation_maps.device)
-            for i in range(activation_maps.shape[1]):
-                cam += weights[:, :, :] * activation_maps[:, i, :, :]
+            # Compute weighted combination
+            cam = (weights * activation_maps).sum(dim=-1)  # [B, H, W]
 
-            # Apply ReLU and normalize
+            # Apply ReLU
             cam = F.relu(cam)
+
+            # Interpolate to image size
             cam = F.interpolate(
-                cam.unsqueeze(0),
+                cam.unsqueeze(1),
                 size=(224, 224),
                 mode='bilinear',
                 align_corners=False
-            )
+            ).squeeze()  # [B, 224, 224]
 
             # Convert to numpy and normalize
-            cam = cam.squeeze().detach().cpu().numpy()
-            cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-7)
+            cam = cam[0].detach().cpu().numpy()  # Take first batch element
+            if cam.max() != cam.min():
+                cam = (cam - cam.min()) / (cam.max() - cam.min())
 
             return cam
 
@@ -274,9 +273,12 @@ class VisionTransformerGradCAM:
             handle_activation.remove()
             handle_gradient.remove()
             raise e
+        finally:
+            # Always remove hooks
+            handle_activation.remove()
+            handle_gradient.remove()
 
 
-# Update the process_image function to handle potential GradCAM errors
 def process_image(image_path, model, bboxes, labels, transform, output_dir):
     """Process a single image with error handling"""
     try:
@@ -341,11 +343,14 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
         ]
 
         try:
+            # Generate and combine GradCAMs for each label
             combined_cam = np.zeros((224, 224))
             for label in labels:
                 if label in disease_names:
                     class_idx = disease_names.index(label)
+                    print_status(f"Generating GradCAM for {label} (class {class_idx})")
                     cam = grad_cam(input_tensor, class_idx)
+                    print_status(f"GradCAM shape: {cam.shape}")
                     combined_cam = np.maximum(combined_cam, cam)
 
             # Overlay GradCAM
@@ -387,6 +392,7 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
         print_status(f"Error processing image: {str(e)}")
         return False
 
+    
 
 def get_images_with_multiple_boxes(csv_path, min_boxes=2, max_boxes=3):
     df = pd.read_csv(csv_path)
