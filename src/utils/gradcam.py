@@ -1,34 +1,124 @@
-import sys
 import os
-from datetime import datetime
-
-# Add the project root to the Python path
-project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.append(project_root)
-
-# Import the rest of the packages
+import sys
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw
 import cv2
+from datetime import datetime
 
-# Import torch first
+# Add the project root to Python path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(os.path.dirname(current_dir))
+sys.path.append(project_root)
+
+# Import matplotlib with Agg backend
+import matplotlib
+
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+# Import torch (CPU only)
 import torch
 import torchvision.transforms as transforms
 
-# Import matplotlib last
-import matplotlib
 
-matplotlib.use('Agg')  # Use non-interactive backend
-import matplotlib.pyplot as plt
-
-from src.models.vit import VisionTransformer
+def get_device():
+    """Get appropriate device while handling CUDA errors gracefully"""
+    return torch.device('cpu')  # Force CPU usage
 
 
 def print_status(message):
     """Simple status printing function"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}", flush=True)
+
+
+class VisionTransformer(torch.nn.Module):
+    """Vision Transformer model definition"""
+
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=14,
+                 embed_dim=768, depth=12, num_heads=12, mlp_ratio=4., qkv_bias=True,
+                 drop_rate=0.):
+        super().__init__()
+        self.patch_embed = torch.nn.Conv2d(in_chans, embed_dim,
+                                           kernel_size=patch_size, stride=patch_size)
+        self.cls_token = torch.nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed = torch.nn.Parameter(torch.zeros(1, (img_size // patch_size) ** 2 + 1, embed_dim))
+        self.pos_drop = torch.nn.Dropout(p=drop_rate)
+
+        # Transformer blocks
+        self.blocks = torch.nn.ModuleList([
+            TransformerBlock(embed_dim, num_heads, mlp_ratio, qkv_bias, drop_rate)
+            for _ in range(depth)
+        ])
+
+        self.norm = torch.nn.LayerNorm(embed_dim)
+        self.head = torch.nn.Linear(embed_dim, num_classes)
+
+
+class TransformerBlock(torch.nn.Module):
+    """Transformer block definition"""
+
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, drop=0.):
+        super().__init__()
+        self.norm1 = torch.nn.LayerNorm(dim)
+        self.attn = MultiHeadAttention(dim, num_heads, qkv_bias, drop)
+        self.norm2 = torch.nn.LayerNorm(dim)
+        self.mlp = MLP(dim, hidden_dim=int(dim * mlp_ratio), drop=drop)
+
+    def forward(self, x):
+        x = x + self.attn(self.norm1(x))
+        x = x + self.mlp(self.norm2(x))
+        return x
+
+
+class MultiHeadAttention(torch.nn.Module):
+    """Multi-head attention mechanism"""
+
+    def __init__(self, dim, num_heads=8, qkv_bias=False, drop=0.):
+        super().__init__()
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = head_dim ** -0.5
+
+        self.qkv = torch.nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.attn_drop = torch.nn.Dropout(drop)
+        self.proj = torch.nn.Linear(dim, dim)
+        self.proj_drop = torch.nn.Dropout(drop)
+
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+
+class MLP(torch.nn.Module):
+    """MLP module"""
+
+    def __init__(self, in_features, hidden_dim, drop=0.):
+        super().__init__()
+        self.fc1 = torch.nn.Linear(in_features, hidden_dim)
+        self.act = torch.nn.GELU()
+        self.drop1 = torch.nn.Dropout(drop)
+        self.fc2 = torch.nn.Linear(hidden_dim, in_features)
+        self.drop2 = torch.nn.Dropout(drop)
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x = self.act(x)
+        x = self.drop1(x)
+        x = self.fc2(x)
+        x = self.drop2(x)
+        return x
 
 
 class VisionTransformerGradCAM:
@@ -110,7 +200,7 @@ def get_images_with_multiple_boxes(csv_path, min_boxes=2, max_boxes=3):
 def process_image(image_path, model, bboxes, labels, transform, output_dir):
     """Process a single image"""
     try:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device = get_device()
 
         # Load and preprocess image
         image = Image.open(image_path).convert('RGB')
@@ -200,6 +290,7 @@ def main():
     # Create output directory
     output_dir = 'outputs'
     os.makedirs(output_dir, exist_ok=True)
+    print_status(f"Created output directory: {output_dir}")
 
     # Paths
     bbox_csv = '/users/gm00051/ChestX-ray14/labels/BBox_List_2017.csv'
@@ -207,6 +298,9 @@ def main():
     checkpoint = '/users/gm00051/projects/cvpr/baseline/Graph-Augmented-Vision-Transformers/scripts/checkpoints/checkpoint_epoch_82_auc_0.7225.pt'
 
     print_status("Loading model...")
+    device = get_device()
+    print_status(f"Using device: {device}")
+
     model = VisionTransformer(
         img_size=224,
         patch_size=16,
@@ -219,9 +313,10 @@ def main():
         drop_rate=0.0
     )
 
-    checkpoint_data = torch.load(checkpoint, map_location='cpu')
+    checkpoint_data = torch.load(checkpoint, map_location=device)
     model.load_state_dict(checkpoint_data['model_state_dict'])
-    model = model.eval()
+    model = model.to(device)
+    model.eval()
 
     # Transform
     transform = transforms.Compose([
