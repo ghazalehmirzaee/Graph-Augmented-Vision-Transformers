@@ -9,17 +9,67 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 import matplotlib
+
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw
 import pickle
-import warnings
-warnings.filterwarnings('ignore')
+import io
+
 
 def print_status(message):
     """Simple status printing function"""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {message}", flush=True)
+
+
+class TensorLoader:
+    """Custom loader for tensor data"""
+
+    def __init__(self):
+        self.dtype_map = {
+            'float32': torch.float32,
+            'float64': torch.float64,
+            'int64': torch.int64,
+            'int32': torch.int32
+        }
+
+    def convert_tensor(self, data):
+        """Convert numpy array or scalar to tensor"""
+        if isinstance(data, np.ndarray):
+            return torch.from_numpy(data)
+        elif isinstance(data, (np.float32, np.float64, np.int32, np.int64)):
+            return torch.tensor(data.item())
+        return data
+
+    def load_tensor_file(self, filepath):
+        """Load tensor data from file"""
+        try:
+            with open(filepath, 'rb') as f:
+                data = torch.load(f, map_location='cpu')
+
+                if isinstance(data, dict) and 'model_state_dict' in data:
+                    state_dict = data['model_state_dict']
+                else:
+                    state_dict = data
+
+                # Convert all values to tensors
+                converted_dict = {}
+                for key, value in state_dict.items():
+                    if isinstance(value, np.ndarray):
+                        converted_dict[key] = torch.from_numpy(value.copy())
+                    elif isinstance(value, torch.Tensor):
+                        converted_dict[key] = value.clone()
+                    else:
+                        try:
+                            converted_dict[key] = torch.tensor(value)
+                        except:
+                            converted_dict[key] = value
+
+                return converted_dict
+        except Exception as e:
+            print_status(f"Error in tensor loading: {str(e)}")
+            return None
 
 
 class PatchEmbed(nn.Module):
@@ -348,63 +398,28 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
 
 
 def safe_load_checkpoint(checkpoint_path, model):
-    """Safely load checkpoint with simplified approach"""
+    """Safely load checkpoint with tensor handling"""
     print_status("Loading checkpoint...")
 
     try:
-        # Add numpy scalar to safe globals before loading
-        torch.serialization.add_safe_globals([('numpy._core.multiarray', 'scalar')])
-
-        # Load checkpoint with pickle support
-        checkpoint = torch.load(checkpoint_path,
-                                map_location='cpu',
-                                weights_only=False,  # Allow pickle loading
-                                pickle_module=pickle)
-
-        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-            print_status("Found model state dict in checkpoint")
-            state_dict = checkpoint['model_state_dict']
-        else:
-            print_status("Using full checkpoint as state dict")
-            state_dict = checkpoint
+        # Create tensor loader
+        loader = TensorLoader()
 
         # Load state dict
+        state_dict = loader.load_tensor_file(checkpoint_path)
+
+        if state_dict is None:
+            print_status("Failed to load state dict")
+            return False
+
+        # Load state dict into model
         model.load_state_dict(state_dict)
-        print_status("Checkpoint loaded successfully")
+        print_status("Successfully loaded checkpoint")
         return True
 
     except Exception as e:
         print_status(f"Error loading checkpoint: {str(e)}")
-        try:
-            # Alternative loading method
-            import numpy as np
-            print_status("Attempting alternative loading method...")
-
-            # Create a custom unpickler
-            class CustomUnpickler(pickle.Unpickler):
-                def find_class(self, module, name):
-                    if module == "numpy._core.multiarray" and name == "scalar":
-                        return np.float32
-                    return super().find_class(module, name)
-
-            # Load with custom unpickler
-            with open(checkpoint_path, 'rb') as f:
-                checkpoint = CustomUnpickler(f).load()
-
-            # Extract state dict
-            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                state_dict = checkpoint['model_state_dict']
-            else:
-                state_dict = checkpoint
-
-            # Load state dict
-            model.load_state_dict(state_dict)
-            print_status("Alternative loading successful")
-            return True
-
-        except Exception as e2:
-            print_status(f"Alternative loading failed: {str(e2)}")
-            return False
+        return False
 
 
 def main():
@@ -435,11 +450,24 @@ def main():
 
     # Try loading checkpoint
     if not safe_load_checkpoint(checkpoint, model):
-        print_status("Failed to load checkpoint. Exiting...")
-        return
+        print_status("Failed to load checkpoint. Trying alternative method...")
+        try:
+            # Alternative loading method using byte stream
+            with open(checkpoint, 'rb') as f:
+                buffer = io.BytesIO(f.read())
+                state_dict = torch.load(buffer, map_location='cpu')
+                if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
+                    model.load_state_dict(state_dict['model_state_dict'])
+                else:
+                    model.load_state_dict(state_dict)
+                print_status("Successfully loaded checkpoint using alternative method")
+        except Exception as e:
+            print_status(f"Alternative loading failed: {str(e)}")
+            return
 
     model.eval()
     print_status("Model ready for inference")
+
 
     # Transform
     transform = transforms.Compose([
