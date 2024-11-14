@@ -611,8 +611,8 @@ def safe_load_checkpoint(checkpoint_path, model):
             if len(new_shape) == 3 and len(old_shape) == 3 and old_shape[1] != new_shape[1]:
                 print_status(f"Resizing pos_embed from {new_shape} to {old_shape}")
                 state_dict['pos_embed'] = torch.nn.functional.interpolate(
-                    state_dict['pos_embed'].unsqueeze(0), size=old_shape[-2:], mode='bilinear', align_corners=False
-                ).squeeze(0)
+                    state_dict['pos_embed'].permute(0, 2, 1).unsqueeze(-1), size=(old_shape[1], 1), mode='bilinear', align_corners=False
+                ).squeeze(-1).permute(0, 2, 1)
 
         # Load the state dictionary into the model
         model.load_state_dict(state_dict, strict=False)
@@ -623,6 +623,9 @@ def safe_load_checkpoint(checkpoint_path, model):
         # Handle any errors during loading
         print_status(f"Failed to load checkpoint: {str(e)}")
         return False
+
+def debug_tensor_shape(tensor, name):
+    print_status(f"{name} shape: {tensor.shape}")
 
 
 def main():
