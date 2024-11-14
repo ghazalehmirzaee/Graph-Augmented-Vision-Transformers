@@ -608,7 +608,7 @@ def safe_load_checkpoint(checkpoint_path, model):
         if 'pos_embed' in state_dict and hasattr(model, 'pos_embed'):
             old_shape = model.pos_embed.shape
             new_shape = state_dict['pos_embed'].shape
-            if old_shape != new_shape:
+            if len(new_shape) == 3 and len(old_shape) == 3 and old_shape[1] != new_shape[1]:
                 print_status(f"Resizing pos_embed from {new_shape} to {old_shape}")
                 state_dict['pos_embed'] = torch.nn.functional.interpolate(
                     state_dict['pos_embed'].unsqueeze(0), size=old_shape[-2:], mode='bilinear', align_corners=False
