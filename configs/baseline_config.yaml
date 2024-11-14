@@ -13,6 +13,7 @@ data:
   val_dir: "/users/gm00051/ChestX-ray14/categorized_images/val"
   train_labels: "/users/gm00051/ChestX-ray14/labels/train_list.txt"
   val_labels: "/users/gm00051/ChestX-ray14/labels/val_list.txt"
+
   image_size: 224
   batch_size: 32
   num_workers: 4
