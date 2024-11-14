@@ -212,96 +212,85 @@ class VisionTransformerGradCAM:
         self.gradients = grad_output[0]
 
     def __call__(self, input_tensor, target_category):
+        """Generate CAM for the specified target category"""
         # Register hooks
         handle_activation = self.model.blocks[-1].register_forward_hook(self.save_activation)
         handle_gradient = self.model.blocks[-1].register_full_backward_hook(self.save_gradient)
 
-        # Forward pass
-        model_output = self.model(input_tensor)
+        try:
+            # Forward pass
+            model_output = self.model(input_tensor)
 
-        # Target for backprop
-        if target_category is None:
-            target_category = model_output.argmax(dim=1)
+            # Target for backprop
+            if target_category is None:
+                target_category = model_output.argmax(dim=1)
 
-        # Backward pass
-        self.model.zero_grad()
-        one_hot = torch.zeros_like(model_output)
-        one_hot[0][target_category] = 1
-        model_output.backward(gradient=one_hot, retain_graph=True)
+            # Backward pass
+            self.model.zero_grad()
+            one_hot = torch.zeros_like(model_output)
+            one_hot[0][target_category] = 1
+            model_output.backward(gradient=one_hot, retain_graph=True)
 
-        # Get gradients and activations
-        gradients = self.gradients.detach().cpu()
-        activations = self.activations.detach().cpu()
+            # Get gradients and activations
+            gradients = self.gradients
+            activations = self.activations
 
-        # Remove hooks
-        handle_activation.remove()
-        handle_gradient.remove()
+            # Remove hooks
+            handle_activation.remove()
+            handle_gradient.remove()
 
-        # Weight gradients
-        weights = gradients.mean(dim=2).mean(dim=2)  # Global average pooling
+            # Calculate attention weights
+            weights = torch.mean(gradients, dim=1)  # [B, H*W]
+            weights = weights.reshape(-1, 14, 14)  # Reshape to match feature map size
 
-        # Generate CAM
-        batch_size, n_tokens, _ = activations.shape
-        cam = torch.zeros(batch_size, 1, int(np.sqrt(n_tokens - 1)), int(np.sqrt(n_tokens - 1)))
+            # Get activation maps (excluding CLS token)
+            activation_maps = activations[:, 1:, :]  # Remove CLS token
+            activation_maps = activation_maps.reshape(-1, 14, 14, activations.shape[-1])
+            activation_maps = activation_maps.permute(0, 3, 1, 2)  # [B, C, H, W]
 
-        # Exclude CLS token
-        activations = activations[:, 1:, :]
-        weights = weights.view(batch_size, -1, 1)
-        cam_features = activations.view(batch_size, int(np.sqrt(n_tokens - 1)), int(np.sqrt(n_tokens - 1)), -1)
-        cam_features = cam_features.permute(0, 3, 1, 2)
+            # Compute weighted combination of activation maps
+            cam = torch.zeros((1, 14, 14), device=activation_maps.device)
+            for i in range(activation_maps.shape[1]):
+                cam += weights[:, :, :] * activation_maps[:, i, :, :]
 
-        # Compute weighted sum
-        for i in range(batch_size):
-            for j in range(weights.shape[1]):
-                cam[:, 0, :, :] += weights[i, j] * cam_features[i, j, :, :]
+            # Apply ReLU and normalize
+            cam = F.relu(cam)
+            cam = F.interpolate(
+                cam.unsqueeze(0),
+                size=(224, 224),
+                mode='bilinear',
+                align_corners=False
+            )
 
-        cam = F.relu(cam)
-        cam = F.interpolate(cam, size=(224, 224), mode='bilinear', align_corners=False)
+            # Convert to numpy and normalize
+            cam = cam.squeeze().detach().cpu().numpy()
+            cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-7)
 
-        # Normalize
-        cam = cam.view(224, 224).numpy()
-        cam = (cam - cam.min()) / (cam.max() - cam.min())
+            return cam
 
-        return cam
-
-
-def get_images_with_multiple_boxes(csv_path, min_boxes=2, max_boxes=3):
-    df = pd.read_csv(csv_path)
-    counts = df['Image Index'].value_counts()
-    valid_images = counts[(counts >= min_boxes) & (counts <= max_boxes)].index
-
-    image_info = {}
-    for img in valid_images:
-        data = df[df['Image Index'] == img]
-        image_info[img] = {
-            'bboxes': [],
-            'labels': []
-        }
-        for _, row in data.iterrows():
-            bbox = [
-                float(row['Bbox_x']),
-                float(row['Bbox_y']),
-                float(row['Bbox_x'] + row['Bbox_w']),
-                float(row['Bbox_y'] + row['Bbox_h'])
-            ]
-            image_info[img]['bboxes'].append(bbox)
-            image_info[img]['labels'].append(row['Finding Label'])
-
-    return image_info
+        except Exception as e:
+            print_status(f"Error in GradCAM generation: {str(e)}")
+            # Clean up hooks in case of error
+            handle_activation.remove()
+            handle_gradient.remove()
+            raise e
 
 
+# Update the process_image function to handle potential GradCAM errors
 def process_image(image_path, model, bboxes, labels, transform, output_dir):
-    """Process a single image"""
+    """Process a single image with error handling"""
     try:
         # Convert image to RGB
         img = cv2.imread(image_path)
+        if img is None:
+            print_status(f"Failed to read image: {image_path}")
+            return False
+
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         image = Image.fromarray(img)
 
         # Get input tensor
         input_tensor = transform(image).unsqueeze(0)
-
-        # Add debugging print statements to check tensor shape
         print_status(f"Input tensor shape: {input_tensor.shape}")
 
         # Initialize GradCAM
@@ -314,8 +303,7 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
         img_array = np.array(image)
         img_with_boxes = img_array.copy()
 
-
-        # Draw boxes using OpenCV instead of PIL
+        # Draw boxes using OpenCV
         colors = plt.cm.rainbow(np.linspace(0, 1, len(labels)))
         for bbox, label, color in zip(bboxes, labels, colors):
             color_rgb = tuple(int(c * 255) for c in color[:3])
@@ -346,25 +334,29 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
         axes[0, 1].axis('off')
 
         # GradCAM visualization
-        combined_cam = np.zeros((224, 224))
         disease_names = [
             'Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration',
             'Mass', 'Nodule', 'Pneumonia', 'Pneumothorax', 'Consolidation',
             'Edema', 'Emphysema', 'Fibrosis', 'Pleural_Thickening', 'Hernia'
         ]
 
-        for label in labels:
-            if label in disease_names:
-                class_idx = disease_names.index(label)
-                cam = grad_cam(input_tensor, class_idx)
-                combined_cam = np.maximum(combined_cam, cam)
+        try:
+            combined_cam = np.zeros((224, 224))
+            for label in labels:
+                if label in disease_names:
+                    class_idx = disease_names.index(label)
+                    cam = grad_cam(input_tensor, class_idx)
+                    combined_cam = np.maximum(combined_cam, cam)
 
-        # Overlay GradCAM
-        resized_img = cv2.resize(img_array, (224, 224))
-        cam_image = np.uint8(255 * combined_cam)
-        heatmap = cv2.applyColorMap(cam_image, cv2.COLORMAP_JET)
+            # Overlay GradCAM
+            resized_img = cv2.resize(img_array, (224, 224))
+            cam_image = np.uint8(255 * combined_cam)
+            heatmap = cv2.applyColorMap(cam_image, cv2.COLORMAP_JET)
+            overlay = cv2.addWeighted(resized_img, 0.6, heatmap, 0.4, 0)
 
-        overlay = cv2.addWeighted(resized_img, 0.6, heatmap, 0.4, 0)
+        except Exception as e:
+            print_status(f"Error generating GradCAM: {str(e)}")
+            overlay = cv2.resize(img_array, (224, 224))  # Fallback to original image
 
         axes[1, 0].imshow(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
         axes[1, 0].set_title('GradCAM Visualization')
@@ -394,6 +386,32 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
     except Exception as e:
         print_status(f"Error processing image: {str(e)}")
         return False
+
+
+def get_images_with_multiple_boxes(csv_path, min_boxes=2, max_boxes=3):
+    df = pd.read_csv(csv_path)
+    counts = df['Image Index'].value_counts()
+    valid_images = counts[(counts >= min_boxes) & (counts <= max_boxes)].index
+
+    image_info = {}
+    for img in valid_images:
+        data = df[df['Image Index'] == img]
+        image_info[img] = {
+            'bboxes': [],
+            'labels': []
+        }
+        for _, row in data.iterrows():
+            bbox = [
+                float(row['Bbox_x']),
+                float(row['Bbox_y']),
+                float(row['Bbox_x'] + row['Bbox_w']),
+                float(row['Bbox_y'] + row['Bbox_h'])
+            ]
+            image_info[img]['bboxes'].append(bbox)
+            image_info[img]['labels'].append(row['Finding Label'])
+
+    return image_info
+
 
 
 # def safe_load_checkpoint(checkpoint_path, model):
