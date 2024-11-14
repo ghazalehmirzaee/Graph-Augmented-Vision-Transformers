@@ -336,34 +336,55 @@ def safe_load_checkpoint(checkpoint_path, model):
     """Safely load checkpoint with proper error handling"""
     try:
         print_status("Loading checkpoint...")
-        # Load with pickle support
-        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
 
-        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-            print_status("Found model state dict in checkpoint")
-            model.load_state_dict(checkpoint['model_state_dict'])
+        # Load raw state dict
+        if torch.cuda.is_available():
+            state_dict = torch.load(checkpoint_path)
         else:
-            print_status("Loading full checkpoint")
-            model.load_state_dict(checkpoint)
+            state_dict = torch.load(checkpoint_path, map_location=torch.device('cpu'))
 
+        # Extract model state dict
+        if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
+            model_state = state_dict['model_state_dict']
+        else:
+            model_state = state_dict
+
+        # Convert state dict to make it compatible
+        converted_state = {}
+        for k, v in model_state.items():
+            if isinstance(v, torch.Tensor):
+                converted_state[k] = v.float()
+            else:
+                try:
+                    converted_state[k] = torch.tensor(v).float()
+                except:
+                    print_status(f"Skipping conversion of {k}")
+                    converted_state[k] = v
+
+        # Load the converted state dict
+        model.load_state_dict(converted_state)
         print_status("Checkpoint loaded successfully")
         return True
+
     except Exception as e:
         print_status(f"Error loading checkpoint: {str(e)}")
-        try:
-            # Try alternative loading method
-            print_status("Attempting alternative loading method...")
-            torch.serialization.add_safe_globals([('numpy._core.multiarray', 'scalar')])
-            checkpoint = torch.load(checkpoint_path, map_location='cpu')
-            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                model.load_state_dict(checkpoint['model_state_dict'])
+        return False
+
+def extract_state_dict(checkpoint_path):
+    """Extract state dict from checkpoint file without loading tensors"""
+    try:
+        with open(checkpoint_path, 'rb') as f:
+            # Get magic number
+            magic = torch.serialization._utils._get_magic_number(f)
+            if magic == 'PKL':
+                # Pickle file
+                return torch.load(checkpoint_path, map_location='cpu', pickle_module=pickle)
             else:
-                model.load_state_dict(checkpoint)
-            print_status("Alternative loading successful")
-            return True
-        except Exception as e2:
-            print_status(f"Alternative loading failed: {str(e2)}")
-            return False
+                # Torch file
+                return torch.load(checkpoint_path, map_location='cpu', weights_only=True)
+    except Exception as e:
+        print_status(f"Error extracting state dict: {str(e)}")
+        return None
 
 
 def main():
@@ -375,10 +396,9 @@ def main():
     # Paths
     bbox_csv = '/users/gm00051/ChestX-ray14/labels/BBox_List_2017.csv'
     image_dir = '/users/gm00051/ChestX-ray14/images'
-    # Use best_model.pt instead of checkpoint_epoch_82_auc_0.7225.pt
     checkpoint = '/users/gm00051/projects/cvpr/baseline/Graph-Augmented-Vision-Transformers/scripts/checkpoints/best_model.pt'
 
-    print_status("Loading model...")
+    print_status("Initializing model...")
 
     # Initialize model
     model = VisionTransformer(
@@ -393,13 +413,31 @@ def main():
         drop_rate=0.0
     )
 
-    # Load checkpoint with new safe loading function
-    if not safe_load_checkpoint(checkpoint, model):
-        print_status("Failed to load checkpoint. Exiting...")
+    # Try multiple loading methods
+    loading_methods = [
+        lambda: safe_load_checkpoint(checkpoint, model),
+        lambda: model.load_state_dict(torch.load(checkpoint, map_location='cpu')['model_state_dict']),
+        lambda: model.load_state_dict(
+            torch.load(checkpoint, map_location='cpu', pickle_module=pickle)['model_state_dict'])
+    ]
+
+    success = False
+    for method in loading_methods:
+        try:
+            method()
+            success = True
+            print_status("Successfully loaded checkpoint")
+            break
+        except Exception as e:
+            print_status(f"Loading method failed: {str(e)}")
+            continue
+
+    if not success:
+        print_status("All loading methods failed. Exiting...")
         return
 
     model.eval()
-    print_status("Model loaded successfully")
+    print_status("Model ready for inference")
 
     # Define transform
     transform = transforms.Compose([
@@ -461,7 +499,10 @@ def main():
 
 
 if __name__ == '__main__':
+    import pickle
+
     try:
         main()
     except Exception as e:
         print_status(f"Fatal error: {str(e)}")
+
