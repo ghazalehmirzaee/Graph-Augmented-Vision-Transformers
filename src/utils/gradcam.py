@@ -333,15 +333,37 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
 
 
 def safe_load_checkpoint(checkpoint_path, model):
+    """Safely load checkpoint with proper error handling"""
     try:
-        state_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
-        if 'model_state_dict' in state_dict:
-            state_dict = state_dict['model_state_dict']
-        model.load_state_dict(state_dict)
+        print_status("Loading checkpoint...")
+        # Load with pickle support
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            print_status("Found model state dict in checkpoint")
+            model.load_state_dict(checkpoint['model_state_dict'])
+        else:
+            print_status("Loading full checkpoint")
+            model.load_state_dict(checkpoint)
+
+        print_status("Checkpoint loaded successfully")
         return True
     except Exception as e:
         print_status(f"Error loading checkpoint: {str(e)}")
-        return False
+        try:
+            # Try alternative loading method
+            print_status("Attempting alternative loading method...")
+            torch.serialization.add_safe_globals([('numpy._core.multiarray', 'scalar')])
+            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                model.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                model.load_state_dict(checkpoint)
+            print_status("Alternative loading successful")
+            return True
+        except Exception as e2:
+            print_status(f"Alternative loading failed: {str(e2)}")
+            return False
 
 
 def main():
@@ -353,7 +375,8 @@ def main():
     # Paths
     bbox_csv = '/users/gm00051/ChestX-ray14/labels/BBox_List_2017.csv'
     image_dir = '/users/gm00051/ChestX-ray14/images'
-    checkpoint = '/users/gm00051/projects/cvpr/baseline/Graph-Augmented-Vision-Transformers/scripts/checkpoints/checkpoint_epoch_82_auc_0.7225.pt'
+    # Use best_model.pt instead of checkpoint_epoch_82_auc_0.7225.pt
+    checkpoint = '/users/gm00051/projects/cvpr/baseline/Graph-Augmented-Vision-Transformers/scripts/checkpoints/best_model.pt'
 
     print_status("Loading model...")
 
@@ -370,7 +393,7 @@ def main():
         drop_rate=0.0
     )
 
-    # Load checkpoint
+    # Load checkpoint with new safe loading function
     if not safe_load_checkpoint(checkpoint, model):
         print_status("Failed to load checkpoint. Exiting...")
         return
@@ -442,4 +465,3 @@ if __name__ == '__main__':
         main()
     except Exception as e:
         print_status(f"Fatal error: {str(e)}")
-        
