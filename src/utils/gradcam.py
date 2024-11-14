@@ -268,9 +268,38 @@ class VisionTransformerGradCAM:
         one_hot[0][target_category] = 1
         model_output.backward(gradient=one_hot, retain_graph=True)
 
+        # Check if gradients were captured
+        if not self.gradients:
+            print_status("Error: Gradients were not captured.")
+            return None  # or raise an error
+
         # Get gradients and feature maps
         gradients = self.gradients[0][0]  # [num_patches, hidden_dim]
         feature_maps = self.feature_maps[0][0]  # [num_patches, hidden_dim]
+
+    #     # Rest of the code continues...
+    #
+    # def __call__(self, input_tensor, target_category=None):
+    #     self.feature_maps = []
+    #     self.gradients = []
+    #
+    #     # Get model prediction
+    #     model_output = self.model(input_tensor)
+    #     if target_category is None:
+    #         target_category = model_output.argmax(dim=1)
+    #
+    #     # Get attention maps
+    #     attention_maps = self.generate_attention_maps(input_tensor)
+    #
+    #     # Backward pass
+    #     self.model.zero_grad()
+    #     one_hot = torch.zeros_like(model_output)
+    #     one_hot[0][target_category] = 1
+    #     model_output.backward(gradient=one_hot, retain_graph=True)
+    #
+    #     # Get gradients and feature maps
+    #     gradients = self.gradients[0][0]  # [num_patches, hidden_dim]
+    #     feature_maps = self.feature_maps[0][0]  # [num_patches, hidden_dim]
 
         # Remove CLS token
         gradients = gradients[1:]
@@ -562,4 +591,3 @@ def main():
 if __name__ == '__main__':
     main()
 
-    
