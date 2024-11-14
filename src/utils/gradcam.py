@@ -347,122 +347,64 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
         return False
 
 
-def extract_state_dict_tensors(checkpoint_path):
-    """Extract only the tensor data from checkpoint"""
-    with open(checkpoint_path, 'rb') as f:
-        # Skip potential metadata
-        try:
-            magic_number = torch.serialization._utils._get_magic_number(f)
-            if magic_number == b'PK\x03\x04':
-                f.seek(0)
-        except:
-            f.seek(0)
-
-        # Try unpickling with a custom class loader
-        class CustomUnpickler(pickle.Unpickler):
-            def find_class(self, module, name):
-                # Convert old numpy scalar type to tensor directly
-                if module == 'numpy._core.multiarray' and name == 'scalar':
-                    return lambda x, dtype: torch.tensor(x)
-                return super().find_class(module, name)
-
-        try:
-            data = CustomUnpickler(f).load()
-            if isinstance(data, dict) and 'model_state_dict' in data:
-                return data['model_state_dict']
-            return data
-        except Exception as e:
-            print_status(f"Custom unpickling failed: {str(e)}")
-            return None
-
-
 def safe_load_checkpoint(checkpoint_path, model):
-    """Safely load checkpoint with proper error handling"""
+    """Safely load checkpoint with simplified approach"""
     print_status("Loading checkpoint...")
 
     try:
-        # Method 1: Direct tensor dictionary loading
-        print_status("Attempting direct tensor loading...")
-        state_dict = extract_state_dict_tensors(checkpoint_path)
-        if state_dict is not None:
-            model.load_state_dict(state_dict)
-            print_status("Successfully loaded checkpoint using direct tensor loading")
-            return True
-    except Exception as e:
-        print_status(f"Direct tensor loading failed: {str(e)}")
+        # Add numpy scalar to safe globals before loading
+        torch.serialization.add_safe_globals([('numpy._core.multiarray', 'scalar')])
 
-    try:
-        # Method 2: Manual state dict reconstruction
-        print_status("Attempting manual state dict reconstruction...")
-        with open(checkpoint_path, 'rb') as f:
-            checkpoint = torch.load(f, map_location='cpu')
+        # Load checkpoint with pickle support
+        checkpoint = torch.load(checkpoint_path,
+                                map_location='cpu',
+                                weights_only=False,  # Allow pickle loading
+                                pickle_module=pickle)
 
         if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-            state_dict = {}
-            for key, value in checkpoint['model_state_dict'].items():
-                if isinstance(value, torch.Tensor):
-                    state_dict[key] = value
-                else:
-                    # Convert non-tensor values to tensors
-                    try:
-                        state_dict[key] = torch.tensor(value)
-                    except:
-                        print_status(f"Skipping conversion of {key}")
-                        state_dict[key] = value
+            print_status("Found model state dict in checkpoint")
+            state_dict = checkpoint['model_state_dict']
+        else:
+            print_status("Using full checkpoint as state dict")
+            state_dict = checkpoint
 
-            model.load_state_dict(state_dict)
-            print_status("Successfully loaded checkpoint using manual reconstruction")
-            return True
-    except Exception as e:
-        print_status(f"Manual reconstruction failed: {str(e)}")
-
-    try:
-        # Method 3: Load only tensor data
-        print_status("Attempting tensor-only loading...")
-        state_dict = torch.load(checkpoint_path, map_location='cpu', weights_only=True)
-        if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
-            state_dict = state_dict['model_state_dict']
+        # Load state dict
         model.load_state_dict(state_dict)
-        print_status("Successfully loaded checkpoint using tensor-only loading")
+        print_status("Checkpoint loaded successfully")
         return True
+
     except Exception as e:
-        print_status(f"Tensor-only loading failed: {str(e)}")
+        print_status(f"Error loading checkpoint: {str(e)}")
+        try:
+            # Alternative loading method
+            import numpy as np
+            print_status("Attempting alternative loading method...")
 
-    print_status("All loading methods failed")
-    return False
+            # Create a custom unpickler
+            class CustomUnpickler(pickle.Unpickler):
+                def find_class(self, module, name):
+                    if module == "numpy._core.multiarray" and name == "scalar":
+                        return np.float32
+                    return super().find_class(module, name)
 
+            # Load with custom unpickler
+            with open(checkpoint_path, 'rb') as f:
+                checkpoint = CustomUnpickler(f).load()
 
-def load_raw_state_dict(path):
-    """Load raw state dict from file"""
-    try:
-        # Try loading with torch's built-in loader
-        return torch.load(path, map_location='cpu', weights_only=True)
-    except:
-        pass
+            # Extract state dict
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                state_dict = checkpoint['model_state_dict']
+            else:
+                state_dict = checkpoint
 
-    try:
-        # Try loading with custom unpickler
-        with open(path, 'rb') as f:
-            unpickler = CustomUnpickler(f)
-            data = unpickler.load()
-            if isinstance(data, dict) and 'model_state_dict' in data:
-                return data['model_state_dict']
-            return data
-    except:
-        pass
+            # Load state dict
+            model.load_state_dict(state_dict)
+            print_status("Alternative loading successful")
+            return True
 
-    return None
-
-
-class CustomUnpickler(pickle.Unpickler):
-    def find_class(self, module, name):
-        # Handle numpy._core.multiarray.scalar
-        if module == 'numpy._core.multiarray' and name == 'scalar':
-            return torch.tensor
-        if module == 'numpy' and name == 'dtype':
-            import numpy
-            return numpy.dtype
-        return super().find_class(module, name)
+        except Exception as e2:
+            print_status(f"Alternative loading failed: {str(e2)}")
+            return False
 
 
 def main():
@@ -491,25 +433,9 @@ def main():
         drop_rate=0.0
     )
 
-    # Try loading with debug information
-    print_status("Attempting to load checkpoint...")
-    try:
-        # First, try to examine the checkpoint
-        with open(checkpoint, 'rb') as f:
-            print_status("Successfully opened checkpoint file")
-
-        # Try different loading methods
-        if not safe_load_checkpoint(checkpoint, model):
-            print_status("All loading methods failed. Trying raw state dict loading...")
-            state_dict = load_raw_state_dict(checkpoint)
-            if state_dict is not None:
-                print_status("Successfully loaded raw state dict")
-                model.load_state_dict(state_dict)
-            else:
-                print_status("Failed to load checkpoint. Exiting...")
-                return
-    except Exception as e:
-        print_status(f"Error during checkpoint loading: {str(e)}")
+    # Try loading checkpoint
+    if not safe_load_checkpoint(checkpoint, model):
+        print_status("Failed to load checkpoint. Exiting...")
         return
 
     model.eval()
