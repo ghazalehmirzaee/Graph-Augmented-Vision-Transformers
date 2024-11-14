@@ -204,7 +204,6 @@ class VisionTransformerGradCAM:
         self.model = model
         self.activations = None
         self.gradients = None
-        self.attention_maps = None
 
     def save_activation(self, module, input, output):
         self.activations = output
@@ -212,152 +211,129 @@ class VisionTransformerGradCAM:
     def save_gradient(self, module, grad_input, grad_output):
         self.gradients = grad_output[0]
 
-    def save_attention(self, module, input, output):
-        # Save attention maps from the last attention layer
-        self.attention_maps = module.attn.attn.detach()
-
     def __call__(self, input_tensor, target_category):
-        """Generate focused GradCAM using attention and gradients"""
-        B = input_tensor.size(0)
+        """Generate focused GradCAM for Vision Transformers"""
+        B = input_tensor.size(0)  # Batch size
 
-        # Register hooks
+        # Register hooks on the last block
         handle_activation = self.model.blocks[-1].register_forward_hook(self.save_activation)
         handle_gradient = self.model.blocks[-1].register_full_backward_hook(self.save_gradient)
-        handle_attention = self.model.blocks[-1].register_forward_hook(self.save_attention)
 
         try:
             # Forward pass
             model_output = self.model(input_tensor)
 
-            # Get target category if not provided
             if target_category is None:
                 target_category = model_output.argmax(dim=1)
 
-            # Zero gradients and perform backward pass
+            # Backward pass
             self.model.zero_grad()
             one_hot = torch.zeros_like(model_output)
             one_hot[0][target_category] = 1
             model_output.backward(gradient=one_hot, retain_graph=True)
 
-            # Get attention from CLS token to patches
-            attn_weights = self.attention_maps[0, :, 0, 1:]  # [num_heads, patch_size]
+            # Get gradients and activations (excluding CLS token)
+            gradients = self.gradients[:, 1:, :]  # [B, N, D]
+            activations = self.activations[:, 1:, :]  # [B, N, D]
 
-            # Get gradients and activations
-            gradients = self.gradients[:, 1:, :]  # Remove CLS token
-            activations = self.activations[:, 1:, :]  # Remove CLS token
+            # Calculate importance weights
+            weights = torch.mean(gradients, dim=-1)  # [B, N]
 
-            # Pool gradients
-            pooled_gradients = torch.mean(gradients, dim=[0, 1])
+            # Reshape activations and weights
+            n_patches = int(np.sqrt(activations.shape[1]))  # Should be 14 for 224x224 image with patch size 16
 
-            # Weight activations by gradients
-            weighted_activations = activations * pooled_gradients.unsqueeze(0).unsqueeze(0)
+            # Weight each activation by its gradient importance
+            cam = torch.zeros((B, n_patches, n_patches), device=activations.device)
 
-            # Combine with attention
-            n_patches = int(np.sqrt(activations.shape[1]))
-            cam = torch.mean(weighted_activations, dim=-1).reshape(-1, n_patches, n_patches)
+            # Reshape activations for spatial interpretation
+            act_reshaped = activations.reshape(B, n_patches, n_patches, -1)  # [B, H, W, D]
+            weights_reshaped = weights.reshape(B, n_patches, n_patches)  # [B, H, W]
 
-            # Weight by attention maps
-            attn_weights = torch.mean(attn_weights, dim=0).reshape(n_patches, n_patches)
-            cam = cam * attn_weights
+            # Compute weighted combination
+            for b in range(B):
+                # Weight the activations by their importance
+                weighted_acts = act_reshaped[b] * weights_reshaped[b].unsqueeze(-1)
+                # Sum across feature dimension
+                cam[b] = torch.sum(weighted_acts, dim=-1)
 
-            # Apply ReLU and normalize
+            # Apply ReLU to focus on features that have a positive influence on the target class
             cam = F.relu(cam)
+
+            # Interpolate to image size
             cam = F.interpolate(
                 cam.unsqueeze(1),
                 size=(224, 224),
                 mode='bicubic',
                 align_corners=False
-            ).squeeze()
+            ).squeeze(1)
 
             # Convert to numpy and enhance
-            cam = cam.detach().cpu().numpy()
-            cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
+            cam = cam[0].detach().cpu().numpy()  # Take first batch element
+
+            # Normalize
+            if cam.max() != cam.min():
+                cam = (cam - cam.min()) / (cam.max() - cam.min())
 
             # Enhance contrast
             cam = (cam * 255).astype(np.uint8)
             cam = cv2.equalizeHist(cam)
-            cam = cv2.GaussianBlur(cam, (5, 5), 0)
+            cam = cv2.GaussianBlur(cam, (3, 3), 0)
             cam = cam.astype(float) / 255.0
 
-            # Apply gamma correction to enhance high activation areas
+            # Apply gamma correction for better visualization
             gamma = 0.4
             cam = np.power(cam, gamma)
 
             return cam
 
         finally:
+            # Clean up hooks
             handle_activation.remove()
             handle_gradient.remove()
-            handle_attention.remove()
-
-
-def process_random_images(image_info, image_dir, model, transform, output_dir, num_images=20):
-    """Process a random subset of images"""
-    # Select random images
-    image_names = list(image_info.keys())
-    random_images = np.random.choice(image_names, min(num_images, len(image_names)), replace=False)
-
-    successful = 0
-    for idx, img_name in enumerate(random_images, 1):
-        print_status(f"Processing image {idx}/{num_images}: {img_name}")
-
-        image_path = os.path.join(image_dir, img_name)
-        if not os.path.exists(image_path):
-            print_status(f"Image not found: {image_path}")
-            continue
-
-        success = process_image(
-            image_path=image_path,
-            model=model,
-            bboxes=image_info[img_name]['bboxes'],
-            labels=image_info[img_name]['labels'],
-            transform=transform,
-            output_dir=output_dir
-        )
-
-        if success:
-            successful += 1
-
-    print_status(f"Processing complete! Successfully processed {successful}/{num_images} images")
-
 
 
 def process_image(image_path, model, bboxes, labels, transform, output_dir):
     """Process a single image with improved visualization"""
     try:
-        # Read and preprocess image
+        # Load and preprocess image
         img = cv2.imread(image_path)
+        if img is None:
+            print_status(f"Failed to read image: {image_path}")
+            return False
+
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         original_size = img.shape[:2]
 
         # Transform for model input
         image_tensor = transform(Image.fromarray(img)).unsqueeze(0)
+        print_status(f"Input tensor shape: {image_tensor.shape}")
 
         # Initialize visualization
         fig, axes = plt.subplots(2, 2, figsize=(20, 20))
-        fig.suptitle(f'Analysis Results for {os.path.basename(image_path)}', fontsize=16)
+        plt.suptitle(f'Analysis Results for {os.path.basename(image_path)}', fontsize=16)
 
         # 1. Original image with bounding boxes
+        img_with_boxes = img.copy()
         for bbox, label, color in zip(bboxes, labels, plt.cm.rainbow(np.linspace(0, 1, len(labels)))):
             color_rgb = tuple(int(c * 255) for c in color[:3])
             cv2.rectangle(
-                img,
+                img_with_boxes,
                 (int(bbox[0]), int(bbox[1])),
                 (int(bbox[2]), int(bbox[3])),
                 color_rgb,
                 3
             )
-            # Add label with background for better visibility
+            # Add label with background
             label_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
             cv2.rectangle(
-                img,
+                img_with_boxes,
                 (int(bbox[0]), int(bbox[1] - label_size[1] - 10)),
                 (int(bbox[0] + label_size[0]), int(bbox[1])),
                 color_rgb,
                 -1
             )
             cv2.putText(
-                img,
+                img_with_boxes,
                 label,
                 (int(bbox[0]), int(bbox[1] - 5)),
                 cv2.FONT_HERSHEY_SIMPLEX,
@@ -366,64 +342,63 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
                 2
             )
 
-        axes[0, 0].imshow(img)
-        axes[0, 0].set_title('Original with Ground Truth Boxes')
+        axes[0, 0].imshow(img_with_boxes)
+        axes[0, 0].set_title('Original with Ground Truth Boxes', fontsize=12)
         axes[0, 0].axis('off')
 
         # 2. Original image
-        axes[0, 1].imshow(cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB))
-        axes[0, 1].set_title('Original Image')
-        axes[0, 1].axis('off')
+        # axes[0, 1].imshow(img)
+        # axes[0, 1].set_title('Original Image', fontsize=12)
+        # axes[0, 1].axis('off')
 
-        # 3. Combined GradCAM visualization
+        # 3. GradCAM visualization
         grad_cam = VisionTransformerGradCAM(model)
-        combined_cam = np.zeros((224, 224))
-
-        # Get model predictions
-        with torch.no_grad():
-            predictions = torch.sigmoid(model(image_tensor)).squeeze().cpu().numpy()
-
         disease_names = [
             'Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration',
             'Mass', 'Nodule', 'Pneumonia', 'Pneumothorax', 'Consolidation',
             'Edema', 'Emphysema', 'Fibrosis', 'Pleural_Thickening', 'Hernia'
         ]
 
-        # Generate GradCAM for ground truth labels
+        # Get model predictions
+        with torch.no_grad():
+            predictions = torch.sigmoid(model(image_tensor)).squeeze().cpu().numpy()
+
+        # Generate combined GradCAM for all ground truth labels
+        combined_cam = np.zeros((224, 224))
         for label in labels:
             if label in disease_names:
                 class_idx = disease_names.index(label)
                 cam = grad_cam(image_tensor, class_idx)
                 combined_cam = np.maximum(combined_cam, cam)
 
-        # Create heatmap overlay
+        # Create heatmap
         heatmap = cv2.applyColorMap(np.uint8(255 * combined_cam), cv2.COLORMAP_JET)
         heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
 
-        # Overlay with original image
-        img_resized = cv2.resize(cv2.cvtColor(cv2.imread(image_path), cv2.COLOR_BGR2RGB), (224, 224))
+        # Resize original image for overlay
+        img_resized = cv2.resize(img, (224, 224))
         overlay = cv2.addWeighted(img_resized, 0.7, heatmap, 0.3, 0)
 
         axes[1, 0].imshow(overlay)
-        axes[1, 0].set_title('GradCAM Visualization')
+        axes[1, 0].set_title('GradCAM Visualization', fontsize=12)
         axes[1, 0].axis('off')
 
         # 4. Predictions text
-        axes[1, 1].axis('off')
-        pred_text = "Model Predictions:\n\n"
-        pred_text += "Ground Truth:\n"
+        pred_text = "Model Analysis:\n\n"
+        pred_text += "Ground Truth Labels:\n"
         for label in labels:
             pred_text += f"- {label}\n"
 
-        pred_text += "\nPredicted (conf > 0.5):\n"
+        pred_text += "\nModel Predictions (conf > 0.5):\n"
         for i, (prob, disease) in enumerate(zip(predictions, disease_names)):
             if prob > 0.5:
                 pred_text += f"- {disease}: {prob:.3f}\n"
 
         axes[1, 1].text(0.1, 0.5, pred_text, fontsize=12, transform=axes[1, 1].transAxes,
                         verticalalignment='center')
+        axes[1, 1].axis('off')
 
-        # Save the figure
+        # Save visualization
         plt.tight_layout()
         save_path = os.path.join(output_dir, f'analysis_{os.path.basename(image_path)}')
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -730,7 +705,7 @@ def main():
         print_status(f"Found {len(image_info)} images with multiple boxes")
 
         # Process random subset of images
-        process_random_images(
+        process_image(
             image_info=image_info,
             image_dir=image_dir,
             model=model,
@@ -751,4 +726,3 @@ if __name__ == '__main__':
     except Exception as e:
         print_status(f"Fatal error: {str(e)}")
 
-        
