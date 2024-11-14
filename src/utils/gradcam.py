@@ -1,6 +1,11 @@
-
 import os
 import sys
+# Add project root to path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+# Import your ViT implementation
+from src.models.vit import VisionTransformer
+
 import numpy as np
 import pandas as pd
 import cv2
@@ -10,13 +15,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision.transforms as transforms
 import matplotlib
-
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw
 import warnings
-
 warnings.filterwarnings('ignore')
+
 
 
 def print_status(message):
