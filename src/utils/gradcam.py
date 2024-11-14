@@ -15,6 +15,7 @@ import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw
 import pickle
 import io
+import types
 
 
 def print_status(message):
@@ -23,53 +24,47 @@ def print_status(message):
     print(f"[{timestamp}] {message}", flush=True)
 
 
-class TensorLoader:
-    """Custom loader for tensor data"""
+class CustomUnpickler(pickle.Unpickler):
+    """Custom unpickler to handle numpy._core"""
 
-    def __init__(self):
-        self.dtype_map = {
-            'float32': torch.float32,
-            'float64': torch.float64,
-            'int64': torch.int64,
-            'int32': torch.int32
-        }
+    def find_class(self, module, name):
+        # Handle numpy._core.multiarray
+        if module == 'numpy._core.multiarray':
+            if name == 'scalar':
+                return float
+            module = 'numpy'
 
-    def convert_tensor(self, data):
-        """Convert numpy array or scalar to tensor"""
-        if isinstance(data, np.ndarray):
-            return torch.from_numpy(data)
-        elif isinstance(data, (np.float32, np.float64, np.int32, np.int64)):
-            return torch.tensor(data.item())
-        return data
+        # Handle any other numpy._core references
+        if module.startswith('numpy._core'):
+            module = 'numpy'
 
-    def load_tensor_file(self, filepath):
-        """Load tensor data from file"""
-        try:
-            with open(filepath, 'rb') as f:
-                data = torch.load(f, map_location='cpu')
+        return super().find_class(module, name)
 
-                if isinstance(data, dict) and 'model_state_dict' in data:
-                    state_dict = data['model_state_dict']
-                else:
-                    state_dict = data
 
-                # Convert all values to tensors
-                converted_dict = {}
-                for key, value in state_dict.items():
-                    if isinstance(value, np.ndarray):
-                        converted_dict[key] = torch.from_numpy(value.copy())
-                    elif isinstance(value, torch.Tensor):
-                        converted_dict[key] = value.clone()
-                    else:
-                        try:
-                            converted_dict[key] = torch.tensor(value)
-                        except:
-                            converted_dict[key] = value
+def load_tensor_from_buffer(buffer):
+    """Load tensor data from buffer with custom unpickling"""
+    try:
+        return CustomUnpickler(buffer).load()
+    except:
+        return None
 
-                return converted_dict
-        except Exception as e:
-            print_status(f"Error in tensor loading: {str(e)}")
-            return None
+
+def fix_state_dict(state_dict):
+    """Fix any numpy or scalar values in state dict"""
+    fixed_dict = {}
+    for key, value in state_dict.items():
+        if isinstance(value, np.ndarray):
+            fixed_dict[key] = torch.from_numpy(value)
+        elif isinstance(value, (np.float32, np.float64, np.int32, np.int64)):
+            fixed_dict[key] = torch.tensor(float(value))
+        elif isinstance(value, torch.Tensor):
+            fixed_dict[key] = value
+        else:
+            try:
+                fixed_dict[key] = torch.tensor(value)
+            except:
+                fixed_dict[key] = value
+    return fixed_dict
 
 
 class PatchEmbed(nn.Module):
@@ -398,28 +393,89 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
 
 
 def safe_load_checkpoint(checkpoint_path, model):
-    """Safely load checkpoint with tensor handling"""
+    """Safely load checkpoint with numpy fixes"""
     print_status("Loading checkpoint...")
 
     try:
-        # Create tensor loader
-        loader = TensorLoader()
+        # First attempt: Load with custom unpickler
+        with open(checkpoint_path, 'rb') as f:
+            checkpoint = load_tensor_from_buffer(f)
 
-        # Load state dict
-        state_dict = loader.load_tensor_file(checkpoint_path)
+        if checkpoint is not None:
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                state_dict = checkpoint['model_state_dict']
+            else:
+                state_dict = checkpoint
 
-        if state_dict is None:
-            print_status("Failed to load state dict")
-            return False
+            # Fix any numpy values
+            state_dict = fix_state_dict(state_dict)
 
-        # Load state dict into model
-        model.load_state_dict(state_dict)
-        print_status("Successfully loaded checkpoint")
-        return True
+            # Load state dict
+            model.load_state_dict(state_dict)
+            print_status("Successfully loaded checkpoint")
+            return True
 
     except Exception as e:
-        print_status(f"Error loading checkpoint: {str(e)}")
-        return False
+        print_status(f"First attempt failed: {str(e)}")
+
+    try:
+        # Second attempt: Load with memory mapping
+        print_status("Attempting memory-mapped loading...")
+        state_dict = {}
+
+        with open(checkpoint_path, 'rb') as f:
+            # Skip magic number and protocol
+            f.seek(2)
+
+            try:
+                data = torch.load(
+                    f,
+                    map_location='cpu',
+                    pickle_module=pickle,
+                    weights_only=True
+                )
+
+                if isinstance(data, dict) and 'model_state_dict' in data:
+                    state_dict = data['model_state_dict']
+                else:
+                    state_dict = data
+
+                model.load_state_dict(state_dict)
+                print_status("Successfully loaded checkpoint using memory mapping")
+                return True
+
+            except Exception as inner_e:
+                print_status(f"Memory-mapped loading failed: {str(inner_e)}")
+
+    except Exception as e:
+        print_status(f"Second attempt failed: {str(e)}")
+
+    try:
+        # Third attempt: Raw file reading
+        print_status("Attempting raw file reading...")
+        with open(checkpoint_path, 'rb') as f:
+            content = f.read()
+
+        # Try to load from memory buffer
+        buffer = io.BytesIO(content)
+        data = load_tensor_from_buffer(buffer)
+
+        if data is not None:
+            if isinstance(data, dict) and 'model_state_dict' in data:
+                state_dict = data['model_state_dict']
+            else:
+                state_dict = data
+
+            state_dict = fix_state_dict(state_dict)
+            model.load_state_dict(state_dict)
+            print_status("Successfully loaded checkpoint using raw reading")
+            return True
+
+    except Exception as e:
+        print_status(f"Third attempt failed: {str(e)}")
+
+    print_status("All loading attempts failed")
+    return False
 
 
 def main():
@@ -450,24 +506,11 @@ def main():
 
     # Try loading checkpoint
     if not safe_load_checkpoint(checkpoint, model):
-        print_status("Failed to load checkpoint. Trying alternative method...")
-        try:
-            # Alternative loading method using byte stream
-            with open(checkpoint, 'rb') as f:
-                buffer = io.BytesIO(f.read())
-                state_dict = torch.load(buffer, map_location='cpu')
-                if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
-                    model.load_state_dict(state_dict['model_state_dict'])
-                else:
-                    model.load_state_dict(state_dict)
-                print_status("Successfully loaded checkpoint using alternative method")
-        except Exception as e:
-            print_status(f"Alternative loading failed: {str(e)}")
-            return
+        print_status("Failed to load checkpoint. Exiting...")
+        return
 
     model.eval()
     print_status("Model ready for inference")
-
 
     # Transform
     transform = transforms.Compose([
