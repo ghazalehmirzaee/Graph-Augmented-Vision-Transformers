@@ -201,13 +201,11 @@ class VisionTransformer(nn.Module):
         return x
 
 
-
 class VisionTransformerGradCAM:
     def __init__(self, model):
         self.model = model
         self.features = None
         self.gradient = None
-        self.attention = None
 
     def save_features(self, module, input, output):
         self.features = output
@@ -215,31 +213,12 @@ class VisionTransformerGradCAM:
     def save_gradient(self, module, grad_input, grad_output):
         self.gradient = grad_output[0]
 
-    def get_attention_weights(self, input_tensor):
-        """Get attention weights from last layer"""
-        tokens = 0
-        attention_weights = []
-
-        def hook_fn(module, input, output):
-            attention_weights.append(output)
-
-        # Register hook on last attention layer
-        handle = self.model.blocks[-1].attn.register_forward_hook(hook_fn)
-        self.model(input_tensor)
-        handle.remove()
-
-        return attention_weights[-1]
-
     def __call__(self, input_tensor, target_category):
         # Register hooks
         handle_features = self.model.blocks[-1].register_forward_hook(self.save_features)
         handle_gradient = self.model.blocks[-1].register_full_backward_hook(self.save_gradient)
 
         try:
-            # Get attention weights
-            attn_weights = self.get_attention_weights(input_tensor)
-            B, H, N, _ = attn_weights.shape  # [batch_size, n_heads, n_patches, n_patches]
-
             # Forward pass
             logits = self.model(input_tensor)
 
@@ -256,24 +235,23 @@ class VisionTransformerGradCAM:
             gradients = self.gradient[0, 1:]  # Remove CLS token
             features = self.features[0, 1:]  # Remove CLS token
 
-            # Weight features by gradients
-            weights = gradients.mean(dim=0)
-            cam = torch.zeros(features.shape[0])
+            # Calculate importance weights
+            weights = gradients.mean(dim=-1).unsqueeze(-1)  # [N, 1]
 
-            # Generate CAM
-            for i in range(features.shape[0]):
-                cam[i] = (weights * features[i]).sum()
+            # Weight features with gradients
+            weighted_features = features * weights
 
-            # Reshape to square feature map
+            # Calculate CAM
+            cam = weighted_features.mean(dim=-1)  # [N]
+
+            # Reshape to square
             n_patches = int(np.sqrt(cam.shape[0]))
             cam = cam.reshape(n_patches, n_patches)
 
-            # Combine with attention
-            attn_cam = attn_weights[0].mean(dim=0)[0, 1:].reshape(n_patches, n_patches)
-            cam = cam * attn_cam
-
-            # ReLU and normalize
+            # Apply ReLU
             cam = F.relu(cam)
+
+            # Interpolate to image size
             cam = F.interpolate(
                 cam.unsqueeze(0).unsqueeze(0),
                 size=(224, 224),
@@ -281,20 +259,15 @@ class VisionTransformerGradCAM:
                 align_corners=False
             )
 
+            # Convert to numpy and normalize
             cam = cam.squeeze().detach().cpu().numpy()
             cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
-
-            # Enhance visualization
-            cam = (cam * 255).astype(np.uint8)
-            cam = cv2.applyColorMap(cam, cv2.COLORMAP_JET)
-            cam = cv2.cvtColor(cam, cv2.COLOR_BGR2RGB)
 
             return cam
 
         finally:
             handle_features.remove()
             handle_gradient.remove()
-
 
 
 def process_image(image_path, model, bboxes, labels, transform, output_dir):
@@ -346,7 +319,7 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
         # Plot 2: GradCAM
         plt.subplot(1, 2, 2)
 
-        # Get predictions and generate GradCAM
+        # Transform image for model
         input_tensor = transform(Image.fromarray(img)).unsqueeze(0)
         grad_cam = VisionTransformerGradCAM(model)
 
@@ -359,8 +332,8 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
             'Edema', 'Emphysema', 'Fibrosis', 'Pleural_Thickening', 'Hernia'
         ]
 
-        # Generate GradCAM for predicted diseases
-        combined_cam = np.zeros((224, 224, 3))
+        # Generate combined GradCAM for predicted diseases
+        combined_cam = np.zeros((224, 224))
         pred_text = "Predictions:\n"
 
         for idx, (prob, disease) in enumerate(zip(predictions, disease_names)):
@@ -369,9 +342,14 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
                 combined_cam = np.maximum(combined_cam, cam)
                 pred_text += f"{disease}: {prob:.3f}\n"
 
+        # Create heatmap overlay
+        heatmap = cv2.applyColorMap(np.uint8(255 * combined_cam), cv2.COLORMAP_JET)
+        heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+
         # Overlay on original image
         img_resized = cv2.resize(img, (224, 224))
-        overlay = cv2.addWeighted(img_resized, 0.6, combined_cam.astype(np.uint8), 0.4, 0)
+        overlay = cv2.addWeighted(img_resized, 0.7, heatmap, 0.3, 0)
+
         plt.imshow(overlay)
         plt.title("GradCAM (Predicted Diseases)", fontsize=12)
         plt.axis('off')
@@ -380,7 +358,7 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
         plt.text(1.05, 0.5, pred_text, transform=plt.gca().transAxes,
                  fontsize=10, verticalalignment='center')
 
-        # Save
+        # Save visualization
         plt.tight_layout()
         save_path = os.path.join(output_dir, f'analysis_{os.path.basename(image_path)}')
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -390,9 +368,10 @@ def process_image(image_path, model, bboxes, labels, transform, output_dir):
 
     except Exception as e:
         print_status(f"Error processing image: {str(e)}")
+        import traceback
         traceback.print_exc()
         return False
-
+    
 
 def get_images_with_multiple_boxes(csv_path, min_boxes=2, max_boxes=3):
     df = pd.read_csv(csv_path)
@@ -505,11 +484,14 @@ def main():
         image_info = get_images_with_multiple_boxes(bbox_csv)
         print_status(f"Found {len(image_info)} images with multiple boxes")
 
-        successful = 0
-        total = len(image_info)
+        # Select random 20 images
+        all_images = list(image_info.keys())
+        selected_images = np.random.choice(all_images, size=20, replace=False)
 
-        for idx, (img_name, info) in enumerate(image_info.items(), 1):
-            print_status(f"Processing image {idx}/{total}: {img_name}")
+        successful = 0
+
+        for idx, img_name in enumerate(selected_images, 1):
+            print_status(f"Processing image {idx}/20: {img_name}")
 
             image_path = os.path.join(image_dir, img_name)
             if not os.path.exists(image_path):
@@ -519,8 +501,8 @@ def main():
             success = process_image(
                 image_path=image_path,
                 model=model,
-                bboxes=info['bboxes'],
-                labels=info['labels'],
+                bboxes=image_info[img_name]['bboxes'],
+                labels=image_info[img_name]['labels'],
                 transform=transform,
                 output_dir=output_dir
             )
@@ -528,20 +510,11 @@ def main():
             if success:
                 successful += 1
 
-            if idx % 10 == 0:
-                print_status(f"Progress: {idx}/{total} images processed ({successful} successful)")
+            if idx % 5 == 0:
+                print_status(f"Progress: {idx}/20 images processed ({successful} successful)")
 
-        print_status(f"Processing complete! Successfully processed {successful}/{total} images")
+        print_status(f"Processing complete! Successfully processed {successful}/20 images")
         print_status(f"Results saved in {output_dir}")
 
     except Exception as e:
         print_status(f"Error during processing: {str(e)}")
-
-
-if __name__ == '__main__':
-    try:
-        main()
-    except Exception as e:
-        print_status(f"Fatal error: {str(e)}")
-
-
